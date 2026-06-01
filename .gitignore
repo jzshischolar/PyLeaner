@@ -1,0 +1,15 @@
+# macOS
+.DS_Store
+
+# Lake build artifacts
+.lake/
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+
+# But keep these important JSON files:
+!lake-manifest.json

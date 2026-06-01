@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyleaner"
+version = "0.1.0"
+description = "Python interface to Lean 4 — structured parsing, tactic execution, and proof interaction"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "jiangzeshi"}
+]
+keywords = ["lean4", "lean-prover", "theorem-proving", "lsp", "parser"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+requires-python = ">=3.9"
+dependencies = []  # Pure stdlib — no external dependencies
+
+[project.urls]
+Homepage = "https://github.com/jiangzeshi/PyLeaner"
+Repository = "https://github.com/jiangzeshi/PyLeaner"
+Documentation = "https://github.com/jiangzeshi/PyLeaner/blob/main/README.md"
+
+[tool.setuptools.packages.find]
+include = ["pyleaner*"]

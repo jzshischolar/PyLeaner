@@ -1,0 +1,8 @@
+{
+  "git.ignoreLimitWarning": true,
+  "git.ignoreSubmodules": true,
+  "git.repositoryScanExcludes": [
+    ".lake/packages/**",
+    ".lake/**"
+  ]
+}
