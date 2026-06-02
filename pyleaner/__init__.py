@@ -44,7 +44,15 @@ def debug_log(msg: str) -> None:
 
 from .client import LspClient  # noqa: E402, F401
 from .pool import WorkerPool  # noqa: E402, F401
-from .rpc_session import KeepAliveManager, RpcSession  # noqa: E402, F401
+from .rpc_session import (  # noqa: E402, F401
+    KeepAliveManager,
+    RpcSession,
+    RpcError,
+    RpcNeedsReconnectError,
+    WorkerRestartedError,
+    RpcContentModifiedError,
+    RpcRequestCancelledError,
+)
 from .worker import Worker  # noqa: E402, F401
 
 __all__ = [
@@ -57,4 +65,9 @@ __all__ = [
     "Worker",
     "KeepAliveManager",
     "RpcSession",
+    "RpcError",
+    "RpcNeedsReconnectError",
+    "WorkerRestartedError",
+    "RpcContentModifiedError",
+    "RpcRequestCancelledError",
 ]

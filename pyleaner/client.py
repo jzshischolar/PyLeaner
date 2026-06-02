@@ -24,8 +24,10 @@ class LspClient:
         self.server_cmd = server_cmd
         self.cwd = cwd
         self.message_id = 0
+        self._id_lock = threading.Lock()
         # Route responses by message id: {msg_id: response_queue}
         self._pending_requests: Dict[int, queue.Queue] = {}
+        self._pending_lock = threading.Lock()
         # Notifications are routed by method name
         self.notification_handlers: dict[str, Any] = {}
         # Worker pool for handling LSP and RPC requests
@@ -149,8 +151,10 @@ class LspClient:
             if "id" in data and "method" not in data:
                 # Response to client request (has id, no method)
                 msg_id = data["id"]
-                if msg_id in self._pending_requests:
-                    self._pending_requests[msg_id].put(data)
+                with self._pending_lock:
+                    pending_q = self._pending_requests.get(msg_id)
+                if pending_q is not None:
+                    pending_q.put(data)
                 else:
                     debug_log(f"Unexpected response id={msg_id}")
             elif "id" in data and "method" in data:
@@ -184,9 +188,10 @@ class LspClient:
         self.process.stdin.flush()
 
     def _next_id(self) -> int:
-        """Get next message ID."""
-        self.message_id += 1
-        return self.message_id
+        """Get next message ID (thread-safe)."""
+        with self._id_lock:
+            self.message_id += 1
+            return self.message_id
 
     # ── LSP protocol ─────────────────────────────────────────
 
@@ -195,7 +200,8 @@ class LspClient:
     ) -> Any:
         """Send a request and wait for response."""
         response_q: queue.Queue = queue.Queue()
-        self._pending_requests[msg_id] = response_q
+        with self._pending_lock:
+            self._pending_requests[msg_id] = response_q
 
         message = {
             "jsonrpc": "2.0",
@@ -214,7 +220,8 @@ class LspClient:
         except queue.Empty:
             raise TimeoutError(f"Timeout waiting for response to {method}")
         finally:
-            self._pending_requests.pop(msg_id, None)
+            with self._pending_lock:
+                self._pending_requests.pop(msg_id, None)
 
     def notify(self, method: str, params: Any) -> None:
         """Send a notification (no response expected)."""
