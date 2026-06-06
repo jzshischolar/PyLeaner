@@ -87,9 +87,12 @@ class Worker:
     def initialize_environment(self) -> None:
         """Call _didopen after worker_pool is ready to receive notifications."""
         debug_log(f"Worker {self.worker_id}: initializing environment with {self._init_uri}")
-        self._didopen(self._init_uri, self._init_text,
-                      language_id=self._init_language_id, timeout=120.0)
-        print(f"worker_id:{self.worker_id} started.")
+        result = self._didopen(self._init_uri, self._init_text,
+                      language_id=self._init_language_id, timeout=300.0)
+        if result == False:
+            print(f"worker_id:{self.worker_id} start failed.")
+        else:
+            print(f"worker_id:{self.worker_id} started.")
 
     # ── Thread loop ──────────────────────────────────────────
 
@@ -143,7 +146,7 @@ class Worker:
         self.document_version = 0
 
     def _didopen(
-        self, uri: str, text: str, language_id: str = "lean4", timeout: float = 120.0
+        self, uri: str, text: str, language_id: str = "lean4", timeout: float = 300.0
     ) -> bool:
         """Send textDocument/didOpen notification and wait for processing."""
         self._reset_version()
@@ -181,7 +184,7 @@ class Worker:
             return False
 
     def _didchange(
-        self, text: str, content_range: dict, timeout: float = 60.0
+        self, text: str, content_range: dict, timeout: float = 120.0
     ) -> list:
         """Send textDocument/didChange notification and wait for processing.
 

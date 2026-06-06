@@ -1,12 +1,12 @@
-# 已处理声明类型的语法树结构
+# Syntax Tree Structure for Supported Declaration Types
 
-本文档整理 `LeanLspExtension/Register.lean` 当前已经支持的 Lean 声明类型，以及这些声明在语法树中的主要节点布局。这里的“语法树结构”指扩展代码实际依赖的 Lean parser node kind 和关键子节点，不是完整 parser 定义。
+This document covers the Lean declaration types currently supported in `LeanLspExtension/Register.lean` and the primary node layout of these declarations in the syntax tree. "Syntax tree structure" here refers to the Lean parser node kinds and key child nodes that the extension code actually depends on, not the complete parser definitions.
 
-## 总体入口
+## Top-Level Entry
 
-声明提取从 command snapshot 的 `snap.stx` 开始。代码首先用 `getDeclarationKindFromSyntax` 读取 command 中的第一个关键字，并识别以下声明类型：
+Declaration extraction starts from the `snap.stx` of the command snapshot. The code first uses `getDeclarationKindFromSyntax` to read the first keyword in the command and identifies the following declaration types:
 
-| kind | 关键字 |
+| kind | Keyword |
 | --- | --- |
 | `def` | `def` |
 | `theorem` | `theorem` |
@@ -18,36 +18,53 @@
 | `abbrev` | `abbrev` |
 | `instance` | `instance` |
 
-随后 `getActualDeclaration` 会把外层 wrapper 规范化为真正的声明节点：
+Then `getActualDeclaration` normalizes outer wrappers into the actual declaration node:
 
-| 输入节点 | 处理方式 |
+| Input Node | Processing |
 | --- | --- |
-| `Lean.Parser.Command.declaration` | 取 `args[1]` 作为实际声明 |
-| Mathlib `lemma` macro node，`kind.toString == "lemma"` | 取 `args[1]` 作为 theorem-shaped 声明 |
-| `definition` / `structure` / `inductive` / `classInductive` / `theorem` / `instance` / `abbrev` / `example` | 直接作为实际声明 |
+| `Lean.Parser.Command.declaration` | Takes `args[1]` as the actual declaration |
+| Mathlib `lemma` macro node, `kind.toString == "lemma"` | Takes `args[1]` as a theorem-shaped declaration |
+| `definition` / `structure` / `inductive` / `classInductive` / `theorem` / `instance` / `abbrev` / `example` | Used directly as the actual declaration |
 
-后续所有 `paramsText`、`typeText`、`bodyText` 都基于这个实际声明节点提取。
+All subsequent `paramsText`, `params`, `typeText`, `bodyText` extractions are based on this actual declaration node.
 
-## 共享 body 节点
+### Dual-Track Parameter Extraction
 
-`def`、`abbrev`、`theorem`、`lemma`、`example` 的正文统一由 `extractBodyText` 处理。它会在实际声明节点中查找第一个声明级 body 节点：
+Every declaration provides parameter information in two forms simultaneously:
 
-| body node kind | 对应源码形式 | 返回文本 |
+| Field | Type | Description |
 | --- | --- | --- |
-| `Lean.Parser.Command.declValSimple` | `:= body` | 去掉开头 `:=` 后的 body |
-| `Lean.Parser.Command.declValEqns` | equation-style alternatives，例如 `| 0 => ...` | 保留整个 equation-style 分支文本 |
+| `paramsText` | `Option String` | Raw parameter text, e.g. `"(x : Nat) (y : Nat)"` (for backward compatibility) |
+| `params` | `Option (Array ParamInfo)` | Structured parameter array; each element contains `name`, `type`, `binderKind` |
 
-这里故意查找声明级 `declValSimple` / `declValEqns`，而不是递归找任意 `:=` atom。这样可以避免把 body 内部的 `let x := ...`、结构字段赋值等误判为声明 body 起点。
+The `ParamInfo` structure:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `name` | `Option String` | Parameter name; `none` for anonymous parameters |
+| `type` | `Option String` | Type annotation text |
+| `binderKind` | `String` | Binding style: `"explicit"` / `"implicit"` / `"strictImplicit"` / `"instance"` |
+
+## Shared Body Nodes
+
+The body of `def`, `abbrev`, `theorem`, `lemma`, and `example` is handled uniformly by `extractBodyText`. It finds the first declaration-level body node in the actual declaration node:
+
+| body node kind | Corresponding source form | Returned text |
+| --- | --- | --- |
+| `Lean.Parser.Command.declValSimple` | `:= body` | The body after stripping the leading `:=` |
+| `Lean.Parser.Command.declValEqns` | Equation-style alternatives, e.g. `| 0 => ...` | The full equation-style branch text |
+
+The code intentionally looks for declaration-level `declValSimple` / `declValEqns` rather than recursively finding any `:=` atom. This avoids misidentifying `let x := ...` inside the body or structure field assignments as the start of the declaration body.
 
 ## def
 
-实际声明节点：
+Actual declaration node:
 
 ```text
 Lean.Parser.Command.definition
 ```
 
-当前代码依赖的结构：
+Structure relied on by current code:
 
 ```text
 definition
@@ -58,22 +75,23 @@ definition
 └─ optDefDeriving / optional tail
 ```
 
-提取规则：
+Extraction rules:
 
-| 字段 | 来源 |
+| Field | Source |
 | --- | --- |
-| `name` | 第一个 identifier |
+| `name` | First identifier |
 | `paramsText` | `optDeclSig.args[0]` |
-| `typeText` | `optDeclSig.args[1]`，去掉开头 `:` |
-| `bodyText` | `declValSimple` 或 `declValEqns` |
+| `params` | `extractStructuredParams` traverses binders from the actual declaration node |
+| `typeText` | `optDeclSig.args[1]`, stripping the leading `:` |
+| `bodyText` | `declValSimple` or `declValEqns` |
 
-支持两类 body：
+Two body forms are supported:
 
 ```lean
 def f (n : Nat) : Nat := n + 1
 ```
 
-对应 `declValSimple`，返回 `n + 1`。
+Corresponds to `declValSimple`, returning `n + 1`.
 
 ```lean
 def factorial : Nat -> Nat
@@ -81,17 +99,17 @@ def factorial : Nat -> Nat
   | n + 1 => (n + 1) * factorial n
 ```
 
-对应 `declValEqns`，返回所有 `| pattern => body` 分支。
+Corresponds to `declValEqns`, returning all `| pattern => body` branches.
 
 ## abbrev
 
-实际声明节点：
+Actual declaration node:
 
 ```text
 Lean.Parser.Command.abbrev
 ```
 
-当前处理方式与 `def` 基本一致：
+Processing is essentially the same as `def`:
 
 ```text
 abbrev
@@ -101,24 +119,25 @@ abbrev
 └─ declVal
 ```
 
-提取规则：
+Extraction rules:
 
-| 字段 | 来源 |
+| Field | Source |
 | --- | --- |
-| `name` | 第一个 identifier |
+| `name` | First identifier |
 | `paramsText` | `optDeclSig.args[0]` |
-| `typeText` | `optDeclSig.args[1]`，去掉开头 `:` |
-| `bodyText` | `declValSimple` 或 `declValEqns` |
+| `params` | `extractStructuredParams` traverses binders from the actual declaration node |
+| `typeText` | `optDeclSig.args[1]`, stripping the leading `:` |
+| `bodyText` | `declValSimple` or `declValEqns` |
 
 ## theorem
 
-实际声明节点：
+Actual declaration node:
 
 ```text
 Lean.Parser.Command.theorem
 ```
 
-当前代码依赖的结构：
+Structure relied on by current code:
 
 ```text
 theorem
@@ -128,23 +147,24 @@ theorem
 └─ declVal
 ```
 
-提取规则：
+Extraction rules:
 
-| 字段 | 来源 |
+| Field | Source |
 | --- | --- |
-| `name` | 第一个 identifier |
+| `name` | First identifier |
 | `paramsText` | `declSig.args[0]` |
-| `typeText` | `declSig.args[1]`，去掉开头 `:` |
-| `bodyText` | `declValSimple` 或 `declValEqns` |
+| `params` | `extractStructuredParams` traverses binders from the actual declaration node |
+| `typeText` | `declSig.args[1]`, stripping the leading `:` |
+| `bodyText` | `declValSimple` or `declValEqns` |
 
-常见形式：
+Common form:
 
 ```lean
 theorem t_ok (n : Nat) : n = n := by
   rfl
 ```
 
-`bodyText` 返回：
+`bodyText` returns:
 
 ```lean
 by
@@ -153,9 +173,9 @@ by
 
 ## lemma
 
-`lemma` 来自 Mathlib macro，而不是 Lean core parser 中的普通 command kind。当前代码先识别 `kind.toString == "lemma"`，再取 `args[1]` 作为 theorem-shaped 声明节点。
+`lemma` comes from a Mathlib macro rather than a regular command kind in the Lean core parser. The current code first identifies `kind.toString == "lemma"`, then takes `args[1]` as the theorem-shaped declaration node.
 
-抽象结构：
+Abstract structure:
 
 ```text
 lemma macro node
@@ -167,24 +187,25 @@ lemma macro node
    └─ declVal
 ```
 
-提取规则与 `theorem` 相同：
+Extraction rules are the same as `theorem`:
 
-| 字段 | 来源 |
+| Field | Source |
 | --- | --- |
-| `name` | 第一个 identifier |
+| `name` | First identifier |
 | `paramsText` | `declSig.args[0]` |
-| `typeText` | `declSig.args[1]`，去掉开头 `:` |
-| `bodyText` | `declValSimple` 或 `declValEqns` |
+| `params` | `extractStructuredParams` traverses binders from the actual declaration node |
+| `typeText` | `declSig.args[1]`, stripping the leading `:` |
+| `bodyText` | `declValSimple` or `declValEqns` |
 
 ## example
 
-实际声明节点：
+Actual declaration node:
 
 ```text
 Lean.Parser.Command.example
 ```
 
-当前代码依赖的结构：
+Structure relied on by current code:
 
 ```text
 example
@@ -193,26 +214,27 @@ example
 └─ declVal
 ```
 
-提取规则：
+Extraction rules:
 
-| 字段 | 来源 |
+| Field | Source |
 | --- | --- |
-| `name` | 固定为 `none` |
-| `paramsText` | 通过 binder traversal 查找 `explicitBinder` / `implicitBinder` / `instBinder` |
-| `typeText` | `optDeclSig.args[1]`，去掉开头 `:` |
-| `bodyText` | `declValSimple` 或 `declValEqns` |
+| `name` | Always `none` |
+| `paramsText` | Found via binder traversal for `explicitBinder` / `implicitBinder` / `instBinder` |
+| `params` | `extractStructuredParams` traverses binders from the actual declaration node |
+| `typeText` | `optDeclSig.args[1]`, stripping the leading `:` |
+| `bodyText` | `declValSimple` or `declValEqns` |
 
-`example` 没有声明名，因此名称提取会提前返回 `none`。
+`example` has no declaration name, so name extraction returns `none` early.
 
 ## instance
 
-实际声明节点：
+Actual declaration node:
 
 ```text
 Lean.Parser.Command.instance
 ```
 
-当前代码依赖的结构：
+Structure relied on by current code:
 
 ```text
 instance
@@ -223,39 +245,40 @@ instance
 └─ declVal
 ```
 
-提取规则：
+Extraction rules:
 
-| 字段 | 来源 |
+| Field | Source |
 | --- | --- |
-| `name` | 第一个 identifier；匿名 instance 可能为 `none` 或取到签名中的第一个 identifier，取决于语法树内容 |
+| `name` | First identifier; anonymous instances may be `none` or get the first identifier in the signature, depending on syntax tree content |
 | `paramsText` | `declSig.args[0]` |
-| `typeText` | `declSig.args[1]`，去掉开头 `:` |
+| `params` | `extractStructuredParams` traverses binders from the actual declaration node |
+| `typeText` | `declSig.args[1]`, stripping the leading `:` |
 | `bodyText` | `whereStructInst` |
 
-instance 的 body 不走普通 `extractBodyText`，而是专门查找：
+The instance body does not go through the normal `extractBodyText`; instead it specifically looks for:
 
 ```text
 Lean.Parser.Command.whereStructInst
 ```
 
-例如：
+For example:
 
 ```lean
 instance : MyClass Nat where
   value := 1
 ```
 
-`bodyText` 返回从 `where` 开始的结构实例字段文本。
+`bodyText` returns the structure instance field text starting from `where`.
 
 ## structure
 
-实际声明节点：
+Actual declaration node:
 
 ```text
 Lean.Parser.Command.structure
 ```
 
-当前代码依赖的结构：
+Structure relied on by current code:
 
 ```text
 structure
@@ -266,51 +289,53 @@ structure
 └─ fields part
 ```
 
-提取规则：
+Extraction rules:
 
-| 字段 | 来源 |
+| Field | Source |
 | --- | --- |
-| `name` | 第一个 identifier |
+| `name` | First identifier |
 | `paramsText` | `optDeclSig.args[0]` |
-| `typeText` | 当前固定为 `none` |
-| `bodyText` | `extractBodyFromStructFields` 从字段区域提取 |
+| `params` | `extractStructuredParams` traverses binders from the actual declaration node |
+| `typeText` | Currently always `none` |
+| `bodyText` | `extractBodyFromStructFields` extracts from the fields region |
 
-当前 `extractBodyFromStructFields` 对 `structure` 读取实际声明节点的 `args[4]` 作为字段区域。如果字段文本以 `where` 开头，会去掉 `where` 后返回剩余字段内容。
+Currently `extractBodyFromStructFields` reads `args[4]` of the actual declaration node as the fields region for `structure`. If the field text starts with `where`, it strips `where` and returns the remaining field content.
 
 ## class
 
-声明关键字识别为：
+The declaration keyword is identified as:
 
 ```text
 class
 ```
 
-实际声明节点通常进入：
+The actual declaration node usually resolves to:
 
 ```text
 Lean.Parser.Command.classInductive
 ```
 
-提取规则在 `extractDeclarations` 中与 `structure`、`inductive` 共用同一个分支：
+Extraction rules share the same branch as `structure` and `inductive` in `extractDeclarations`:
 
-| 字段 | 来源 |
+| Field | Source |
 | --- | --- |
-| `name` | 第一个 identifier |
+| `name` | First identifier |
 | `paramsText` | `optDeclSig.args[0]` |
-| `typeText` | 当前固定为 `none` |
-| `bodyText` | 结构字段式 body 提取路径 |
+| `params` | `extractStructuredParams` traverses binders from the actual declaration node |
+| `typeText` | Currently always `none` |
+| `bodyText` | Structure-field-style body extraction path |
 
-注意：`getActualDeclaration` 已接受 `classInductive`，但 `extractBodyFromStructFields` 的显式 kind 判断目前只列出 `structure` 和 `inductive`。因此 class body 提取依赖当前语法树实际落到兼容结构，或者需要后续把 `classInductive` 显式加入字段提取判断。
+Note: `getActualDeclaration` already accepts `classInductive`, but `extractBodyFromStructFields` currently only lists `structure` and `inductive` in its explicit kind check. Therefore class body extraction relies on the current syntax tree falling into a compatible structure, or `classInductive` needs to be explicitly added to the field extraction check in the future.
 
 ## inductive
 
-实际声明节点：
+Actual declaration node:
 
 ```text
 Lean.Parser.Command.inductive
 ```
 
-当前代码依赖的结构：
+Structure relied on by current code:
 
 ```text
 inductive
@@ -321,31 +346,35 @@ inductive
 └─ constructors part
 ```
 
-提取规则：
+Extraction rules:
 
-| 字段 | 来源 |
+| Field | Source |
 | --- | --- |
-| `name` | 第一个 identifier |
+| `name` | First identifier |
 | `paramsText` | `optDeclSig.args[0]` |
-| `typeText` | 当前固定为 `none` |
-| `bodyText` | `extractBodyFromStructFields` 从 constructors 区域提取 |
+| `params` | `extractStructuredParams` traverses binders from the actual declaration node |
+| `typeText` | Currently always `none` |
+| `bodyText` | `extractBodyFromStructFields` extracts from the constructors region |
 
-当前实现同样读取实际声明节点的 `args[4]` 作为 constructors 区域，并去掉开头 `where`。
+The current implementation also reads `args[4]` of the actual declaration node as the constructors region, and strips a leading `where`.
 
-## 辅助提取函数对应关系
+## Helper Extraction Functions
 
-| 函数 | 作用 |
+| Function | Purpose |
 | --- | --- |
-| `extractParamsFromOptDeclSig` | 从 `optDeclSig.args[0]` 提取参数，用于 `def` / `abbrev` / `structure` / `class` / `inductive` |
-| `extractTypeFromOptDeclSig` | 从 `optDeclSig.args[1]` 提取类型，用于 `def` / `abbrev` |
-| `extractParamsFromDeclSig` | 从 `declSig.args[0]` 提取参数，用于 `theorem` / `lemma` / `instance` |
-| `extractTypeFromDeclSig` | 从 `declSig.args[1]` 提取命题或类型，用于 `theorem` / `lemma` / `instance` |
-| `extractTypeText` | 专门处理 `definition` / `abbrev` / `example` 的 optDeclSig 类型提取 |
-| `extractBodyText` | 提取 `declValSimple` / `declValEqns` |
-| `extractBodyFromWhereStructInst` | 提取 instance 的 `whereStructInst` |
-| `extractBodyFromStructFields` | 提取 structure / inductive 的字段或构造子区域 |
+| `extractParamsFromOptDeclSig` | Extracts parameter text (`paramsText`) from `optDeclSig.args[0]`; used for `def` / `abbrev` / `structure` / `class` / `inductive` |
+| `extractTypeFromOptDeclSig` | Extracts type from `optDeclSig.args[1]`; used for `def` / `abbrev` |
+| `extractParamsFromDeclSig` | Extracts parameter text (`paramsText`) from `declSig.args[0]`; used for `theorem` / `lemma` / `instance` |
+| `extractTypeFromDeclSig` | Extracts proposition or type from `declSig.args[1]`; used for `theorem` / `lemma` / `instance` |
+| `extractStructuredParams` | Extracts structured parameters (`params : Array ParamInfo`) by traversing binders from the actual declaration node |
+| `extractBinderParamInfo` | Extracts `ParamInfo` from a single binder node |
+| `extractExplicitOrImplicitBinderInfo` | Handles `explicitBinder` / `implicitBinder` / `strictImplicitBinder` |
+| `extractInstBinderInfo` | Handles `instBinder`, extracting instance parameters |
+| `extractTypeText` | Handles optDeclSig type extraction specifically for `definition` / `abbrev` / `example` |
+| `extractBodyText` | Extracts `declValSimple` / `declValEqns` |
+| `extractBodyFromWhereStructInst` | Extracts `whereStructInst` for instances |
+| `extractBodyFromStructFields` | Extracts field or constructor regions for structure / inductive |
 
-## 与错误发现的关系
+## Relationship with Error Detection
 
-声明语法树提取和错误发现是两条独立路径。当前 command 级错误只使用官方 `doc.diagnosticsRef` 中的 diagnostics，并通过 LSP range 映射回 command range；声明字段提取仍然基于 snapshot syntax tree 的节点 range。
-
+Declaration syntax tree extraction and error detection are two independent paths. Current command-level errors only use the official diagnostics from `doc.diagnosticsRef` and map them back to the command range via LSP range; declaration field extraction is still based on the node ranges of the snapshot syntax tree.
