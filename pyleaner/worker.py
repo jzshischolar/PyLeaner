@@ -236,10 +236,10 @@ class Worker:
                 try:
                     for diag in diagnostics:
                         severity = diag.get("severity")
-                        if severity != 1:
-                            continue
-                        else:
+                        if severity is None or severity <= 3:
                             valid_diagnostics.append(diag)
+                        else:
+                            continue
                     break
                 except Exception:
                     print("error!")
