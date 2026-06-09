@@ -90,10 +90,23 @@ partial def findFirstIdent (stx : Lean.Syntax) : Option String :=
         ) none)
       (fun _ => none)
 
-/-- Helper function to get the leading keyword from a syntax node, specifically for declaration types -/
+/-- Helper function to get the leading keyword from a syntax node, specifically for declaration types.
+    Skips doc comments and modifiers by unwrapping the declaration wrapper first. -/
 partial def getDeclarationKeyword (stx : Lean.Syntax) : RequestM String := do
-  -- Directly use findFirstAtom to recursively search for the first atom
-  pure (findFirstAtom stx)
+  -- Unwrap `declaration` / `lemma` wrapper nodes to skip doc comments and modifiers,
+  -- then find the first atom of the actual declaration (def/theorem/lemma/...).
+  let targetStx :=
+    stx.ifNode (fun n =>
+      let kind := n.getKind
+      let args := n.getArgs
+      if kind == ``Lean.Parser.Command.declaration && args.size > 1 then
+        args[1]!
+      else if kind.toString == "lemma" && args.size > 1 then
+        args[1]!
+      else
+        stx
+    ) (fun _ => stx)
+  pure (findFirstAtom targetStx)
 
 /-- Helper function to identify declaration kind from syntax structure -/
 partial def getDeclarationKindFromSyntax (stx : Lean.Syntax) : RequestM (Option String) := do
