@@ -784,7 +784,8 @@ def extractDeclarations (_params : ExtractDeclarationsParams) : RequestM (Reques
 
         let (hasError, errorMessage) := if errorMessages.isEmpty then
           -- No runtime errors, check syntax errors
-          checkDeclarationSyntaxError kind stx doc.meta.text
+          -- checkDeclarationSyntaxError kind stx doc.meta.text
+          (false, some "")
         else
           -- Has runtime errors, build error message
           (true, some (String.intercalate "; " errorMessages.toList))

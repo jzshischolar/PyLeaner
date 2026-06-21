@@ -6,31 +6,40 @@ A Python interface to the Lean 4 kernel — designed for AI–Lean interactive a
 
 ## Highlights
 
-1. **Lightweight API.** The Python client exposes a clean, minimal interface. File versioning, message management, and RPC session keep-alive are all handled automatically behind the scenes — focus on your research, not the plumbing.
+1. **Deep kernel access via native RPC.**  Unlike bridges limited to LSP, PyLeaner calls directly into Lean's kernel through its RPC extension — no shelling out, no regex on source files.
 
-2. **Extensible, deep kernel access.** Unlike existing Python–Lean bridges that are limited to basic LSP operations, PyLeaner supports Lean's native RPC extension mechanism. You can call into Lean's kernel arbitrarily — syntax tree parsing (done), proof goal extraction (done), diagnostic extraction (done), definition equivalence checking (planned), and more.
+2. **Native concurrency.**  A worker pool manages multiple Lean environments with automatic load balancing.  Tasks are routed to the least-busy worker; concurrency is transparent to the caller.
 
-3. **Transparent concurrency.** A built-in worker pool manages multiple concurrent LSP server instances with load balancing and dynamic routing. Concurrency is fully transparent to the user — no manual scheduling or thread management required.
+3. **Self-healing.**  A built-in watchdog detects crashes, wedges, and fatal errors, then restarts the full server process tree and rebuilds the pool.  `client.submit_resilient()` transparently retries innocent work and raises `ToxicTaskError` for the task that caused the failure so it is never retried blindly.
 
 ## Features
 
-- **Structured Declaration Extraction** — Parse `def`, `theorem`, `lemma`, `structure`, `inductive`, `class`, `instance`, `abbrev`, `example` with full parameter, type, and body information
-- **Tactic Execution** — Execute tactics and get proof states programmatically
-- **Diagnostics** — Get real-time error and warning information from the Lean compiler
-- **Worker Pool** — Manage multiple LSP server instances with load balancing for parallel processing
-- **Mathlib Compatible** — PyLeaner does **not** depend on Mathlib itself, but fully supports Mathlib projects. Simply `import Mathlib` in your target file and PyLeaner's syntax-tree-based extraction works with any Lean 4 library out of the box
+- **Declaration extraction** — `def`, `theorem`, `lemma`, `structure`, `inductive`, `class`, `instance`, `abbrev`, `example` with full parameter, type, and body information
+- **Syntax tree parsing** — Access Lean's internal syntax tree via `parseDocument` and `debugSyntaxTree`
+- **Proof goal inspection** — Query proof state at any source position (`$/lean/plainGoal`)
+- **Diagnostics** — Real-time compiler errors and warnings (`textDocument/publishDiagnostics`)
 
 ## Architecture
 
 ```
-┌──────────────────┐     LSP/RPC      ┌──────────────────────────┐
-│   Python Client  │ ◄──────────────► │   Lean 4 LSP Extension   │
-│   (pyleaner)     │                  │   (LeanLspExtension)     │
-│                  │                  │                          │
-│  • LspClient     │                  │  • extractDeclarations   │
-│  • WorkerPool    │                  │  • parseDocument         │
-│  • RPC_session   │                  │  • Diagnostics           │
-└──────────────────┘                  └──────────────────────────┘
+
+  ┌──────────────────────────────────┐    ┌───────────────────────────┐
+  │       Python Client (pyleaner)   │    │       Lean 4 side         │
+  │                                  │    │                           │
+  │  ┌──────────┐                    │    │  ┌─────────────────────┐  │
+  │  │ Watchdog ├────────────────────┼────┼──┤ lake serve          │  │
+  │  └────┬─────┘  monitor & restart │    │  │  ├─ lean --server   │  │
+  │       │                          │    │  │  └─ lean --worker   │  │
+  │  ┌────┴─────┐                    │    │  └─────────────────────┘  │
+  │  │LspClient │                    │    │                           │
+  │  └────┬─────┘                    │    │  ┌─────────────────────┐  │
+  │       │              RPC call    │    │  │ LeanLspExtension    │  │
+  │  ┌────┴─────┐────────────────────┼────┼──┤ • extractDecls      │  │
+  │  │WorkerPool│                    │    │  │ • parseDocument     │  │
+  │  │ • router │                    │    │  │ • plainGoal         │  │
+  │  │ • workers│                    │    │  │ • diagnostics       │  │
+  │  └──────────┘                    │    │  └─────────────────────┘  │
+  └──────────────────────────────────┘    └───────────────────────────┘
 ```
 
 ## Installation
@@ -43,6 +52,7 @@ PyLeaner contains **both** the Lean extension and the Python client in a single 
 git clone https://github.com/jzshischolar/PyLeaner
 ```
 
+
 ### 2. Lean Extension
 
 Add the cloned directory as a Lake dependency in your Lean project:
@@ -51,6 +61,7 @@ Add the cloned directory as a Lake dependency in your Lean project:
 -- lakefile.lean
 require PyLeaner from "/path/to/PyLeaner"
 ```
+
 
 Or with `lakefile.toml`:
 
@@ -61,17 +72,20 @@ name = "PyLeaner"
 path = "/path/to/PyLeaner"
 ```
 
+
 Then in your Lean files:
 
 ```lean
 import LeanLspExtension
 ```
 
+
 ### 3. Python Client
 
 ```bash
 pip install /path/to/PyLeaner
 ```
+
 
 ## Quick Start
 
@@ -84,6 +98,7 @@ python examples/demo.py --declarations    # extract declarations
 python examples/demo.py --diagnostics     # compiler diagnostics
 python examples/demo.py --proof-goal      # inspect proof state
 ```
+
 
 Or use the API directly:
 
@@ -115,6 +130,23 @@ client.shutdown()
 client.exit()
 ```
 
+
+## Crash Resilience
+
+A built-in **Watchdog** monitors the Lean server and auto-recovers from
+crashes, silent wedges, and fatal errors.  The caller uses
+`client.submit_resilient()` — a drop-in replacement that transparently
+retries on the revived server and raises `ToxicTaskError` for the task
+that caused the failure (so it is never retried blindly).
+
+Key design points:
+
+- **Three detection layers**: fatal stderr (instant), task deadline (120 s), process death (20 s poll)
+- **Full process-tree restart**: kills `lake` + `lean --server` + `lean --worker`, then rebuilds the pool.  No orphaned Lean processes.
+- **Process isolation**: `lean --server` runs in its own session — terminal signals (SIGINT/SIGHUP) don't propagate to it.
+- **Orphan prevention**: six exit paths all converge on `_kill_process_tree` or `/proc` orphan scanning, plus a cron fallback every 4 hours.
+- **Worker gating**: uninitialized workers are skipped by the router; `create_pool` raises if all workers fail.
+
 ## How It Works
 
 ### Task dispatch via WorkerPool
@@ -122,12 +154,14 @@ client.exit()
 All operations go through the **WorkerPool**. You never call a Worker directly — the pool routes each task to the least-busy worker and returns the result. This keeps the API simple and avoids race conditions on shared documents.
 
 ```
+
 you  →  pool.extract_declarations(text=...)
          →  router picks least-busy worker
               →  worker queues the task
                    →  worker runs didChange + RPC call atomically
                         →  result returned to you
 ```
+
 
 ### Atomic content change + information retrieval
 
@@ -160,6 +194,7 @@ def my_new_task(self, text, ...):
     return self._submit("my_new_task", {"text": text, ...})
 ```
 
+
 ## API Reference
 
 ### LspClient
@@ -170,11 +205,19 @@ Main client for communicating with the Lean 4 LSP server.
 |--------|-------------|
 | `connect()` | Start server + initialize handshake (replaces start/initialize/initialized) |
 | `create_pool(text, uri?, size?)` | Create worker pool + load file content |
-| `start()` | Start the LSP server subprocess |
+| `submit_resilient(task_type, kwargs)` | Submit a task with transparent crash/wedge recovery |
+| `start()` | Start the LSP server subprocess (isolated session) |
 | `initialize(root_uri)` | Send LSP initialize request |
 | `initialized()` | Send initialized notification |
 | `shutdown()` | Send shutdown request |
-| `exit()` | Send exit notification |
+| `exit()` | Kill full process tree + cleanup (no orphans) |
+
+### Exceptions
+
+| Exception | Meaning |
+|-----------|---------|
+| `ToxicTaskError(task_type, reason, input_text)` | This task caused the server to crash/wedge — **do not retry** |
+| `ServiceUnavailable` | Internal retryable signal — the server is restarting; transparently retried by `submit_resilient` |
 
 ### WorkerPool
 
@@ -205,6 +248,7 @@ Main client for communicating with the Lean 4 LSP server.
   "errorMessage": null
 }
 ```
+
 
 ### ParamInfo
 

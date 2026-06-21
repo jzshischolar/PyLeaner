@@ -62,15 +62,37 @@ class WorkerPool:
 
         Must be called AFTER LspClient.worker_pool is assigned so that
         notification routing works during _didopen.
+
+        Raises RuntimeError if *all* workers fail to start.
         """
+        failed = 0
         for w in self.workers:
-            w.initialize_environment()
+            if not w.initialize_environment():
+                failed += 1
+        if failed == len(self.workers):
+            raise RuntimeError(
+                f"All {failed} workers failed to initialize their Lean environment."
+            )
+        if failed:
+            print(f"[WARNING] {failed}/{len(self.workers)} workers failed to start; "
+                  f"continuing with {len(self.workers) - failed} healthy.", flush=True)
 
     def router(self):
-        """Route tasks to the least-busy worker."""
+        """Route tasks to the least-busy *initialized* worker."""
         while True:
             task = self.overall_task_queue.get()
-            worker = min(self.workers, key=lambda w: w.task_queue.qsize())
+            ready = [w for w in self.workers if w._ready]
+            if not ready:
+                # No healthy workers left — fail the task so the caller
+                # can retry or escalate instead of wedging silently.
+                rq = task.get("result_q")
+                if rq is not None:
+                    rq.put({
+                        "success": False,
+                        "error": RuntimeError("No healthy workers available"),
+                    })
+                continue
+            worker = min(ready, key=lambda w: w.task_queue.qsize())
             worker.task_queue.put(task)
 
     def submit_task(self, task: Task):

@@ -2,17 +2,127 @@
 
 from __future__ import annotations
 
+import atexit
 import json
+import os
 import queue
+import signal
 import subprocess
 import threading
 import time
 from typing import Any, Optional, Dict, TYPE_CHECKING
 
 from . import debug_log
+from .errors import ServiceUnavailable, ToxicTaskError
+from .watchdog import FATAL_RE
 
 if TYPE_CHECKING:
     from .pool import WorkerPool
+
+
+# Global registry of root PIDs started by any LspClient.  _cleanup_lean_processes
+# walks these on abnormal exit so even non-orphaned children are reaped.
+_CHILD_ROOT_PIDS: set = set()
+_CHILD_PIDS_LOCK = threading.Lock()
+
+
+def _cleanup_lean_processes() -> None:
+    """Best-effort reaper for Lean processes on abnormal exit.
+
+    Registered once (atexit + SIGTERM + SIGHUP).  Kills every PID in the global
+    registry (using _kill_process_tree logic where possible), then falls back
+    to ``_find_orphaned_lean`` for any processes that were reparented to init.
+    """
+    from .watchdog import _kill_process_tree, _find_orphaned_lean, _collect_descendants
+
+    # Phase 1: kill known root PIDs (processes we started).
+    with _CHILD_PIDS_LOCK:
+        known = list(_CHILD_ROOT_PIDS)
+        _CHILD_ROOT_PIDS.clear()
+    for root_pid in known:
+        try:
+            descendants = _collect_descendants(root_pid)
+            for pid in descendants:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except Exception:
+                    pass
+            os.kill(root_pid, signal.SIGKILL)
+        except Exception:
+            pass
+
+    # Phase 2: sweep for any remaining orphans (reparented to init).
+    try:
+        for pid in _find_orphaned_lean():
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def _is_dead_server_error(err: Exception) -> bool:
+    """Return True if ``err`` indicates the server process is dead (pipe/conn gone).
+
+    Covers: BrokenPipeError (EPIPE), ConnectionResetError (ECONNRESET), and
+    any OSError with errno 32 or 104 that means the other end of the pipe is closed.
+    """
+    if isinstance(err, (BrokenPipeError, ConnectionResetError)):
+        return True
+    if isinstance(err, OSError) and getattr(err, "errno", None) in (32, 104):
+        return True
+    msg = str(err)
+    if "Broken pipe" in msg or "Errno 32" in msg:
+        return True
+    return False
+
+
+def _submit_resilient(client: "LspClient", task_type: str, kwargs: dict,
+                      timeout: float = 120.0):
+    """Submit a task with transparent crash/wedge recovery.
+
+    Waits for ``server_ready``, submits to the CURRENT worker pool (re-fetched
+    each attempt so a restarted pool is used), and on ``ServiceUnavailable``
+    either raises :class:`ToxicTaskError` (this task caused the failure) or
+    transparently retries (innocent task). Returns the task content on success.
+    """
+    input_text = kwargs.get("text", "") if isinstance(kwargs, dict) else ""
+    while True:
+        client.watchdog.server_ready.wait()
+        pool = client.worker_pool
+        if pool is None:
+            raise RuntimeError("Worker pool not initialized")
+        rq: queue.Queue = queue.Queue()
+        pool.submit_task({"task_type": task_type, "result_q": rq, "kwargs": kwargs})
+        try:
+            resp = rq.get(timeout=timeout)
+        except queue.Empty:
+            # Task timed out — server likely wedged.  Wait for the watchdog to
+            # detect the wedge (deadline=120s) and initiate restart — the restart
+            # clears server_ready first, then re-sets it when the new server is up.
+            # We poll until server_ready goes False (restart in progress), then
+            # continue to the top of the while-True where server_ready.wait() will
+            # block until the fresh server is ready.
+            while client.watchdog.server_ready.is_set():
+                time.sleep(0.5)
+            continue
+        if resp.get("success", False):
+            return resp.get("content")
+        err = resp.get("error", "unknown error")
+        if isinstance(err, ServiceUnavailable):
+            if resp.get("toxic"):
+                raise ToxicTaskError(task_type, "crashed/wedged the server",
+                                     input_text)
+            continue  # innocent -> transparent retry on the (now-current) pool
+        # Pipe/connection errors mean the server process died (^C, OOM, crash).
+        # Wait for the watchdog to restart, then retry — same as ServiceUnavailable
+        # for an innocent task.
+        if _is_dead_server_error(err):
+            while client.watchdog.server_ready.is_set():
+                time.sleep(0.5)
+            continue
+        raise RuntimeError(str(err) or repr(err))
 
 
 class LspClient:
@@ -41,6 +151,10 @@ class LspClient:
         self.notification_handlers["textDocument/publishDiagnostics"] = (
             self._handle_publish_diagnostics
         )
+        # Liveness watchdog: revives the server if its process dies. Started in
+        # connect(), armed in create_pool(), stopped in exit().
+        from .watchdog import Watchdog  # deferred to avoid import cycle
+        self.watchdog: Watchdog = Watchdog(self)
 
     # ── Process management ──────────────────────────────────
 
@@ -55,7 +169,22 @@ class LspClient:
             text=False,
             bufsize=0,
             cwd=self.cwd,
+            start_new_session=True,  # detach from terminal process group
         )
+
+        # Track root PID for cleanup on abnormal exit.
+        try:
+            with _CHILD_PIDS_LOCK:
+                _CHILD_ROOT_PIDS.add(self.process.pid)
+        except Exception:
+            pass
+
+        # Ensure child processes are reaped even on abnormal exit.
+        if not hasattr(LspClient, "_cleanup_registered"):
+            atexit.register(_cleanup_lean_processes)
+            signal.signal(signal.SIGTERM, lambda *_: _cleanup_lean_processes())
+            signal.signal(signal.SIGHUP, lambda *_: _cleanup_lean_processes())
+            LspClient._cleanup_registered = True  # type: ignore[attr-defined]
 
         # Start reader threads
         threading.Thread(
@@ -130,7 +259,7 @@ class LspClient:
                 break
 
     def _read_stderr(self) -> None:
-        """Read stderr from server (for debugging)."""
+        """Read stderr from server; flag universal fatals to the watchdog."""
         while self.process and self.process.poll() is None:
             try:
                 if self.process.stderr is None:
@@ -139,6 +268,8 @@ class LspClient:
                 if line:
                     line_str = line.decode("utf-8", errors="replace").rstrip()
                     print(f"SERVER STDERR: {line_str}", flush=True)
+                    if FATAL_RE.search(line_str):
+                        self.watchdog.flag_fatal(line_str)
             except Exception:
                 break
 
@@ -268,6 +399,7 @@ class LspClient:
         self.start()
         self.initialize(f"file://{self.cwd or '.'}", timeout=timeout)
         self.initialized()
+        self.watchdog.start()
 
     def create_pool(self, text: str, uri: str = "", size: int = 1) -> Optional[WorkerPool]:
         """Create a worker pool and load the given text into all workers.
@@ -280,7 +412,18 @@ class LspClient:
         if not uri:
             uri = f"file://{self.cwd or '.'}/workers/"
         self.initialize_worker_pool(size=size, init_uri=uri, init_text=text)
+        self.watchdog.arm(text, size)
         return self.worker_pool
+
+    def submit_resilient(self, task_type: str, kwargs: dict, timeout: float = 120.0):
+        """Submit a task with transparent crash/wedge recovery.
+
+        Waits for the server to be ready, submits to the current worker pool, and
+        on ``ServiceUnavailable`` either raises :class:`ToxicTaskError` (this task
+        caused the failure) or transparently retries (innocent). See
+        :func:`pyleaner.client._submit_resilient`.
+        """
+        return _submit_resilient(self, task_type, kwargs, timeout)
 
     def shutdown(self) -> Any:
         """Shutdown LSP connection."""
@@ -288,14 +431,18 @@ class LspClient:
         return self.request("shutdown", {}, 0)
 
     def exit(self) -> None:
-        """Send exit notification and terminate server."""
+        """Send exit notification and terminate server (full process tree)."""
+        self.watchdog.stop()
         self.notify("exit", {})
         if self.process:
-            self.process.terminate()
-            time.sleep(0.5)
-            if self.process.poll() is None:
-                self.process.kill()
-            self.process.wait()
+            # Remove from global registry before killing (clean shutdown).
+            try:
+                with _CHILD_PIDS_LOCK:
+                    _CHILD_ROOT_PIDS.discard(self.process.pid)
+            except Exception:
+                pass
+            from .watchdog import _kill_process_tree
+            _kill_process_tree(self.process)
             debug_log("LSP server terminated")
 
     # ── Worker pool ──────────────────────────────────────────

@@ -9,6 +9,8 @@ from typing import Any, Optional, TYPE_CHECKING
 
 from . import debug_log, Task
 from .rpc_session import RpcSession, KeepAliveManager
+from .errors import ServiceUnavailable
+from .watchdog import POISON_METHOD
 
 if TYPE_CHECKING:
     from .client import LspClient
@@ -45,6 +47,13 @@ class Worker:
         self.document_version: int = 0
         # Track which URI this worker is responsible for
         self.uri = init_uri
+        # In-flight task tracking: for the watchdog's wedge-deadline detection
+        # (task_started_at) and toxic attribution (current_task).
+        self.current_task: Optional[Task] = None
+        self.task_started_at: Optional[float] = None
+        # Set to True once _didopen succeeds; the router skips workers that are
+        # not ready so a failed initialization doesn't silently wedge tasks.
+        self._ready: bool = False
 
         self.process_funcs: dict[str, Any] = {
             "ping": self.ping,
@@ -84,15 +93,21 @@ class Worker:
         )
         self.thread.start()
 
-    def initialize_environment(self) -> None:
-        """Call _didopen after worker_pool is ready to receive notifications."""
+    def initialize_environment(self) -> bool:
+        """Call _didopen after worker_pool is ready to receive notifications.
+
+        Returns True if the Lean environment initialized successfully.
+        """
         debug_log(f"Worker {self.worker_id}: initializing environment with {self._init_uri}")
-        result = self._didopen(self._init_uri, self._init_text,
-                      language_id=self._init_language_id, timeout=300.0)
-        if result == False:
-            print(f"worker_id:{self.worker_id} start failed.")
+        ok = self._didopen(self._init_uri, self._init_text,
+                           language_id=self._init_language_id, timeout=300.0)
+        if not ok:
+            print(f"[ERROR] worker_id:{self.worker_id} start failed.", flush=True)
+            self._ready = False
         else:
+            self._ready = True
             print(f"worker_id:{self.worker_id} started.")
+        return ok
 
     # ── Thread loop ──────────────────────────────────────────
 
@@ -102,15 +117,55 @@ class Worker:
             task: Task = self.task_queue.get()
             if task is None:  # Shutdown signal
                 break
+            self.current_task = task
+            self.task_started_at = time.monotonic()
             task_type = task.get("task_type")
             result_q = task.get("result_q")
             kwargs = task.get("kwargs", {})
             try:
                 result = self.process_funcs[task_type](**kwargs)
                 result_q.put({"success": True, "content": result})
+            except ServiceUnavailable:
+                # Poisoned by the watchdog during a restart: fail the in-flight
+                # task (toxic flag from its _culprit mark) + drain queued tasks
+                # as innocent, then exit (the hard restart replaces this pool).
+                self._on_service_unavailable()
+                break
             except Exception as e:
                 if result_q is not None:
                     result_q.put({"success": False, "error": e})
+            finally:
+                self.current_task = None
+                self.task_started_at = None
+
+    def _on_service_unavailable(self) -> None:
+        """Poisoned by the watchdog mid-restart.
+
+        Fail the in-flight task (toxic flag from its ``_culprit`` mark) and drain
+        the task_queue, failing every queued (innocent) task as non-toxic so its
+        caller transparently retries on the new pool.
+        """
+        cur = self.current_task
+        if cur is not None and cur.get("result_q") is not None:
+            cur["result_q"].put({
+                "success": False,
+                "error": ServiceUnavailable(),
+                "toxic": bool(cur.get("_culprit", False)),
+            })
+        while True:
+            try:
+                t = self.task_queue.get_nowait()
+            except queue.Empty:
+                break
+            if t is None:
+                continue
+            rq = t.get("result_q")
+            if rq is not None:
+                rq.put({
+                    "success": False,
+                    "error": ServiceUnavailable(),
+                    "toxic": False,
+                })
 
     # ── Internal communication ───────────────────────────────
 
@@ -213,6 +268,12 @@ class Worker:
         while True:
             msg = self.notification_queue.get(timeout=timeout)
             method = msg.get("method")
+
+            # Poisoned by the watchdog during a restart: abort this didChange so
+            # the task fails fast (and the worker drains its queue) instead of
+            # blocking until the deadline.
+            if method == POISON_METHOD:
+                raise ServiceUnavailable()
 
             if (
                 method == "textDocument/publishDiagnostics"
