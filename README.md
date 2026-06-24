@@ -131,22 +131,6 @@ client.exit()
 ```
 
 
-## Crash Resilience
-
-A built-in **Watchdog** monitors the Lean server and auto-recovers from
-crashes, silent wedges, and fatal errors.  The caller uses
-`client.submit_resilient()` — a drop-in replacement that transparently
-retries on the revived server and raises `ToxicTaskError` for the task
-that caused the failure (so it is never retried blindly).
-
-Key design points:
-
-- **Three detection layers**: fatal stderr (instant), task deadline (120 s), process death (20 s poll)
-- **Full process-tree restart**: kills `lake` + `lean --server` + `lean --worker`, then rebuilds the pool.  No orphaned Lean processes.
-- **Process isolation**: `lean --server` runs in its own session — terminal signals (SIGINT/SIGHUP) don't propagate to it.
-- **Orphan prevention**: six exit paths all converge on `_kill_process_tree` or `/proc` orphan scanning, plus a cron fallback every 4 hours.
-- **Worker gating**: uninitialized workers are skipped by the router; `create_pool` raises if all workers fail.
-
 ## How It Works
 
 ### Task dispatch via WorkerPool
@@ -194,6 +178,21 @@ def my_new_task(self, text, ...):
     return self._submit("my_new_task", {"text": text, ...})
 ```
 
+## Crash Resilience
+
+A built-in **Watchdog** monitors the Lean server and auto-recovers from
+crashes, silent wedges, and fatal errors.  The caller uses
+`client.submit_resilient()` — a drop-in replacement that transparently
+retries on the revived server and raises `ToxicTaskError` for the task
+that caused the failure (so it is never retried blindly).
+
+Key design points:
+
+- **Three detection layers**: fatal stderr (instant), task deadline (120 s), process death (20 s poll)
+- **Full process-tree restart**: kills `lake` + `lean --server` + `lean --worker`, then rebuilds the pool.  No orphaned Lean processes.
+- **Process isolation**: `lean --server` runs in its own session — terminal signals (SIGINT/SIGHUP) don't propagate to it.
+- **Orphan prevention**: six exit paths all converge on `_kill_process_tree` or `/proc` orphan scanning, plus a cron fallback every 4 hours.
+- **Worker gating**: uninitialized workers are skipped by the router; `create_pool` raises if all workers fail.
 
 ## API Reference
 

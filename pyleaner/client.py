@@ -247,7 +247,8 @@ class LspClient:
                 message = self._read_message(self.process.stdout)
                 if message:
                     debug_log(
-                        f"Received: {message[:200]}"
+                        f"Received: "
+                        f"{self._sanitize_for_terminal(message[:200])}"
                         f"{'...' if len(message) > 200 else ''}"
                     )
                     self._handle_message(message)
@@ -258,6 +259,24 @@ class LspClient:
                 debug_log(f"Error reading stdout: {e}")
                 break
 
+    @staticmethod
+    def _sanitize_for_terminal(text: str) -> str:
+        """Replace terminal control characters (0x00–0x1F except \\t\\n\\r).
+
+        A bare 0x03 (ETX) printed to stdout is interpreted by the terminal
+        driver as Ctrl+C, sending SIGINT to the foreground process group.
+        This function prevents binary garbage in Lean's output from
+        accidentally interrupting the Python process.
+        """
+        out: list = []
+        for ch in text:
+            cp = ord(ch)
+            if cp < 0x20 and ch not in ("\t", "\n", "\r"):
+                out.append(f"\\x{cp:02x}")
+            else:
+                out.append(ch)
+        return "".join(out)
+
     def _read_stderr(self) -> None:
         """Read stderr from server; flag universal fatals to the watchdog."""
         while self.process and self.process.poll() is None:
@@ -266,7 +285,8 @@ class LspClient:
                     break
                 line = self.process.stderr.readline()
                 if line:
-                    line_str = line.decode("utf-8", errors="replace").rstrip()
+                    line_str = self._sanitize_for_terminal(
+                        line.decode("utf-8", errors="replace").rstrip())
                     print(f"SERVER STDERR: {line_str}", flush=True)
                     if FATAL_RE.search(line_str):
                         self.watchdog.flag_fatal(line_str)
