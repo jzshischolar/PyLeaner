@@ -14,7 +14,7 @@ from typing import Any, Optional, Dict, TYPE_CHECKING
 
 from . import debug_log
 from .errors import ServiceUnavailable, ToxicTaskError
-from .watchdog import FATAL_RE
+from .watchdog import FATAL_RE, WEDGE_DEADLINE
 
 if TYPE_CHECKING:
     from .pool import WorkerPool
@@ -87,6 +87,25 @@ def _submit_resilient(client: "LspClient", task_type: str, kwargs: dict,
     either raises :class:`ToxicTaskError` (this task caused the failure) or
     transparently retries (innocent task). Returns the task content on success.
     """
+    # CRITICAL: the client-side timeout must EXCEED the watchdog's wedge
+    # deadline + its poll interval.  A wedged task is resolved by the watchdog's
+    # poison mechanism, which attributes toxicity (culprit -> the worker puts a
+    # ``toxic=True`` response in our result_q).  If the client timed out FIRST,
+    # it would leave rq.get() before that toxic response arrived, discard it, and
+    # retry blindly — so a toxic task would be re-submitted on every restart and
+    # wedge the server again forever (observed as: watchdog revives, worker
+    # "started", then total silence for ~WEDGE_DEADLINE, repeat).
+    #
+    # The watchdog detects a wedge at the first poll where elapsed > deadline,
+    # i.e. at most deadline + interval after task start, then poisons within ms.
+    # Clamp so we are still in rq.get() when that happens.  The margin (60s) is
+    # deliberately generous: this workload is latency-insensitive but
+    # robustness-critical, so we give the watchdog ample headroom over its
+    # worst-case detection latency (deadline + interval = 140s) to resolve every
+    # wedge via poison/attribution rather than the client bailing early.
+    min_timeout = WEDGE_DEADLINE + 60.0   # 120s deadline + 60s margin = 180s
+    effective_timeout = max(timeout, min_timeout)
+
     input_text = kwargs.get("text", "") if isinstance(kwargs, dict) else ""
     while True:
         client.watchdog.server_ready.wait()
@@ -96,14 +115,11 @@ def _submit_resilient(client: "LspClient", task_type: str, kwargs: dict,
         rq: queue.Queue = queue.Queue()
         pool.submit_task({"task_type": task_type, "result_q": rq, "kwargs": kwargs})
         try:
-            resp = rq.get(timeout=timeout)
+            resp = rq.get(timeout=effective_timeout)
         except queue.Empty:
-            # Task timed out — server likely wedged.  Wait for the watchdog to
-            # detect the wedge (deadline=120s) and initiate restart — the restart
-            # clears server_ready first, then re-sets it when the new server is up.
-            # We poll until server_ready goes False (restart in progress), then
-            # continue to the top of the while-True where server_ready.wait() will
-            # block until the fresh server is ready.
+            # Only reachable if the watchdog FAILED to detect/restart within
+            # effective_timeout (e.g. watchdog thread died).  Wait for any
+            # in-flight restart to settle, then retry on the (possibly new) pool.
             while client.watchdog.server_ready.is_set():
                 time.sleep(0.5)
             continue
