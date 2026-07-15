@@ -49,6 +49,14 @@ FATAL_RE = re.compile(
 # A task running longer than this (seconds) with no result is treated as wedged.
 # Must exceed the longest legitimate elaboration in your workload.
 WEDGE_DEADLINE = 120.0
+WATCHDOG_POLL_INTERVAL = 20.0
+
+# RPC waits must outlive the watchdog's worst-case wedge detection
+# (deadline + one poll), otherwise a local queue timeout escapes before the
+# watchdog can attribute and recover the task.  The resilient caller waits
+# longer still, so it remains available to receive the poison/retry response.
+RPC_RESPONSE_TIMEOUT = WEDGE_DEADLINE + WATCHDOG_POLL_INTERVAL + 20.0
+RESILIENT_RESPONSE_TIMEOUT = RPC_RESPONSE_TIMEOUT + 40.0
 
 # Sentinel "method" injected into a worker's notification_queue to abort its
 # blocked _didchange/_didopen read with ServiceUnavailable.
@@ -190,7 +198,7 @@ class Watchdog:
     def __init__(
         self,
         client: "LspClient",
-        interval: float = 20.0,
+        interval: float = WATCHDOG_POLL_INTERVAL,
     ):
         """
         Args:
@@ -317,11 +325,22 @@ class Watchdog:
                     w.rpc_session.invalidate()
                 except Exception:
                     pass
+        # Wake every LSP/RPC caller before dropping the old response routing.
+        # Merely clearing this mapping leaves callers blocked until their local
+        # timeout, which can beat submit_resilient's recovery protocol.
+        pending = []
         try:
             with self.client._pending_lock:
+                pending = list(self.client._pending_requests.values())
                 self.client._pending_requests.clear()
         except Exception:
-            pass
+            pending = []
+        from .errors import ServiceUnavailable
+        for response_q in pending:
+            try:
+                response_q.put_nowait(ServiceUnavailable())
+            except Exception:
+                pass
 
     def _restart(self, trigger: str, reason: str) -> None:
         """The SOLE revival path (watchdog-internal, single-threaded).

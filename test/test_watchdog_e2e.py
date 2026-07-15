@@ -10,23 +10,25 @@ Verifies the general liveness watchdog:
   5. get_diagnostics on the revived server -> responsive again.
 
 Run:
-    python test_watchdog_e2e.py
+    python test/test_watchdog_e2e.py
 """
 
 import sys
 import os
 import time
+from pathlib import Path
 
 # Test against the source tree (edits are live); the installed copy matches it
 # after `pip install`.
-sys.path.insert(0, "/home/lcw/PyLeaner")
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
 import pyleaner  # noqa: E402
 from pyleaner import LspClient  # noqa: E402
 from pyleaner.watchdog import _kill_process_tree  # noqa: E402
 
 BASE = "-- base env\n"
-CWD = "/home/lcw/PyLeaner"
+CWD = str(PROJECT_ROOT)
 
 
 def main() -> int:

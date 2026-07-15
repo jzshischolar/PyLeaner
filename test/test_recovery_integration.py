@@ -9,19 +9,21 @@ Scenarios:
 Uses a 3s watchdog interval (post-start override) so the tests don't wait the
 full 20s production cadence.
 
-Run: python3 pyleaner/test_recovery_integration.py
+Run: python3 test/test_recovery_integration.py
 """
 
 import os
 import sys
 import time
 import threading
+from pathlib import Path
 
-sys.path.insert(0, "/home/lcw/PyLeaner")
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
 from pyleaner import LspClient, ToxicTaskError  # noqa: E402
 
-CWD = "/home/lcw/PyLeaner"
+CWD = str(PROJECT_ROOT)
 WEDGE = "#eval Nat.pow 10 9999999993\n"   # runtime panic -> wedge (process alive)
 TRIVIAL = "-- ok\n"
 

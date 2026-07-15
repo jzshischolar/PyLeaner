@@ -3,9 +3,9 @@
 
 Tests one method at a time with its own fresh LSP session.
 Usage:
-    python test_all_methods.py               # run all tests
-    python test_all_methods.py 1             # run only test #1 (ping)
-    python test_all_methods.py 1 3 7         # run tests #1, #3, #7
+    python test/test_all_methods.py               # run all tests
+    python test/test_all_methods.py 1             # run only test #1 (ping)
+    python test/test_all_methods.py 1 3 7         # run tests #1, #3, #7
 """
 
 import sys
@@ -58,9 +58,9 @@ def submit(client, task_type, kwargs, timeout=60.0):
         return False, resp.get("error")
 
 
-def test_one(num: int, name: str, task_type: str, kwargs: dict,
-             expect_success: bool = True,
-             cwd=None) -> bool:
+def run_one(num: int, name: str, task_type: str, kwargs: dict,
+            expect_success: bool = True,
+            cwd=None) -> bool:
     """Run a single test with its own fresh session."""
     print(f"\n[{num}] {name} ... ", end="", flush=True)
 
@@ -165,7 +165,7 @@ def main():
     for t in selected:
         num, name, task_type, kwargs = t[0], t[1], t[2], t[3]
         expect = t[4] if len(t) > 4 else True
-        ok = test_one(num, name, task_type, dict(kwargs), expect_success=expect)
+        ok = run_one(num, name, task_type, dict(kwargs), expect_success=expect)
         if ok:
             passed += 1
         else:

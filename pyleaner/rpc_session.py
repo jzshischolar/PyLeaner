@@ -9,6 +9,8 @@ import time
 from typing import Any, Optional, Dict, Set, TYPE_CHECKING
 
 from . import debug_log
+from .errors import ServiceUnavailable
+from .watchdog import RPC_RESPONSE_TIMEOUT
 
 if TYPE_CHECKING:
     from .client import LspClient
@@ -47,6 +49,17 @@ class RpcRequestCancelledError(RpcError):
     """Request was cancelled (-32800)."""
 
     pass
+
+
+class RpcTimeoutError(TimeoutError):
+    """A Lean RPC response did not arrive within its configured deadline."""
+
+    def __init__(self, method: str, timeout: float):
+        self.method = method
+        self.timeout = timeout
+        super().__init__(
+            f"Timeout waiting {timeout:g}s for RPC response to {method}"
+        )
 
 
 def classify_rpc_error(error: dict) -> Exception:
@@ -281,7 +294,8 @@ class RpcSession:
 
         msg_id = self.client._next_id()
         response_q = queue.Queue()
-        self.client._pending_requests[msg_id] = response_q
+        with self.client._pending_lock:
+            self.client._pending_requests[msg_id] = response_q
 
         message = {
             "jsonrpc": "2.0",
@@ -303,6 +317,9 @@ class RpcSession:
 
             response = response_q.get(timeout=timeout)
 
+            if isinstance(response, ServiceUnavailable):
+                raise response
+
             if "error" in response:
                 raise classify_rpc_error(response["error"])
 
@@ -318,12 +335,11 @@ class RpcSession:
             return result
 
         except queue.Empty:
-            raise TimeoutError(
-                f"Timeout waiting for RPC response to {method}"
-            )
+            raise RpcTimeoutError(method, timeout)
 
         finally:
-            self.client._pending_requests.pop(msg_id, None)
+            with self.client._pending_lock:
+                self.client._pending_requests.pop(msg_id, None)
             self.last_activity = time.time()
 
     def call(
@@ -331,7 +347,7 @@ class RpcSession:
         method: str,
         params: dict,
         position: Optional[Dict[str, int]] = None,
-        timeout: float = 60.0,
+        timeout: float = RPC_RESPONSE_TIMEOUT,
         retry_on_reconnect: bool = True,
     ) -> Any:
         """Make an RPC call with automatic session recovery.

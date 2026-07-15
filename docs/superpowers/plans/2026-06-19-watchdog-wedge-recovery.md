@@ -6,7 +6,7 @@
 
 **Architecture:** The Watchdog daemon already polls process liveness every 20s and revives on death. We extend it with two wedge signals — server-declared fatals on stderr (`INTERNAL PANIC` / `Stack overflow` / OOM) and a per-worker task-age deadline. On any trigger it clears a `server_ready` Event, marks the culprit task(s) (`_culprit`), poisons all workers so their blocked `_didchange` aborts, hard-restarts the server+pool, then sets `server_ready`. A new `LspClient.submit_resilient()` waits on `server_ready`, submits to the *current* pool, and on `ServiceUnavailable` either raises `ToxicTaskError` (culprit) or transparently retries (innocent). Attribution: deadline → precise (the over-deadline worker); fatal/death → 通杀 (all in-flight); queued tasks are always innocent.
 
-**Tech Stack:** Python 3.12 stdlib only (threading, queue, subprocess, re). Lean 4.25.0-rc2 via `lake serve`. Tests are runnable scripts (`python3 pyleaner/test_*.py`) — no pytest dependency. Integration tests need a working Lean toolchain.
+**Tech Stack:** Python 3.12 stdlib only (threading, queue, subprocess, re). Lean 4.25.0-rc2 via `lake serve`. Tests are runnable scripts under `test/`. Integration tests need a working Lean toolchain.
 
 ---
 
@@ -19,8 +19,8 @@
 | `pyleaner/worker.py` | Worker tracks `current_task` + `task_started_at`; `_didchange` raises `ServiceUnavailable` on poison sentinel; `_run` fails current_task (toxic flag) + drains task_queue (innocent) + exits on `ServiceUnavailable` | **Modify** |
 | `pyleaner/client.py` | `_read_stderr` flags fatals to watchdog; new `submit_resilient()` transparent-retry submit; wire `server_ready` into connect/create_pool/exit (already wired for watchdog start/stop) | **Modify** |
 | `pyleaner/__init__.py` | Export `ToxicTaskError`, `ServiceUnavailable` | **Modify** |
-| `pyleaner/test_recovery_unit.py` | Unit tests (no server): fatal matching, attribution, `server_ready`, `submit_resilient` retry loop, worker drain | **Create** |
-| `pyleaner/test_recovery_integration.py` | Integration tests (real server): crash revival, wedge→ToxicTaskError (panic), innocent→retry, deadline→ToxicTaskError | **Create** |
+| `test/test_recovery_unit.py` | Unit tests (no server): fatal matching, attribution, `server_ready`, `submit_resilient` retry loop, worker drain | **Create** |
+| `test/test_recovery_integration.py` | Integration tests (real server): crash revival, wedge→ToxicTaskError (panic), innocent→retry, deadline→ToxicTaskError | **Create** |
 | `checker_lean_native.py` (app) | `_submit_task` delegates to `submit_resilient`; `except ToxicTaskError` → error prompt to model | **Modify** |
 
 **Constants (in watchdog.py):**
@@ -34,7 +34,7 @@
 
 **Files:** Create `pyleaner/errors.py`; Modify `pyleaner/watchdog.py`, `pyleaner/__init__.py`.
 
-- [ ] **Step 1: Write the failing unit test** (`pyleaner/test_recovery_unit.py`)
+- [ ] **Step 1: Write the failing unit test** (`test/test_recovery_unit.py`)
 
 ```python
 import sys, os, time, threading
@@ -130,7 +130,7 @@ def take_fatal(self):
 ```
 
 - [ ] **Step 5: Export from `__init__.py`**: add `from .errors import ServiceUnavailable, ToxicTaskError` and both names to `__all__`.
-- [ ] **Step 6: Run unit test → PASS.** `python3 pyleaner/test_recovery_unit.py`
+- [ ] **Step 6: Run unit test → PASS.** `python3 test/test_recovery_unit.py`
 
 ---
 
@@ -515,7 +515,7 @@ def submit_resilient(self, task_type, kwargs, timeout=120.0):
 
 ## Task 7: Integration tests — crash revival + wedge→toxic + innocent retry
 
-**Files:** Create `pyleaner/test_recovery_integration.py`. (Requires Lean toolchain; slow.)
+**Files:** Create `test/test_recovery_integration.py`. (Requires Lean toolchain; slow.)
 
 - [ ] **Step 1: Write the integration script** with these scenarios:
 
@@ -526,7 +526,7 @@ def submit_resilient(self, task_type, kwargs, timeout=120.0):
 
   Each scenario prints `PASS`/`FAIL` with the observed timing.
 
-- [ ] **Step 2: Run scenarios 1–3** (`python3 pyleaner/test_recovery_integration.py`). Scenario 4 is best-effort.
+- [ ] **Step 2: Run scenarios 1–3** (`python3 test/test_recovery_integration.py`). Scenario 4 is best-effort.
 - [ ] **Step 3: Fix failures** by returning to the relevant Task; re-run until 1–3 PASS.
 
 (Concrete code for the integration script is written during execution against the real `submit_resilient`/`Watchdog` APIs finalized in Tasks 1–6 — the unit tests pin those APIs, so the integration script is straightforward.)
@@ -568,11 +568,11 @@ except ToxicTaskError as e:
 
 ## Task 9: Full suite + regression
 
-- [ ] **Step 1:** `python3 pyleaner/test_recovery_unit.py` → all PASS.
-- [ ] **Step 2:** `python3 pyleaner/test_watchdog_e2e.py` → still PASS (crash revival, unchanged contract).
-- [ ] **Step 3:** `python3 pyleaner/test_recovery_integration.py` → scenarios 1–3 PASS.
-- [ ] **Step 4:** Re-run `python3 pyleaner/check_pow2005.py` and `reproduce_13987.py` to confirm no regression in the earlier findings.
-- [ ] **Step 5:** Reinstall into the venv (`/home/lcw/myenv/bin/pip install -e /home/lcw/PyLeaner`) and re-run the integration suite against the installed copy.
+- [ ] **Step 1:** `python3 test/test_recovery_unit.py` → all PASS.
+- [ ] **Step 2:** `python3 test/test_watchdog_e2e.py` → still PASS (crash revival, unchanged contract).
+- [ ] **Step 3:** `python3 test/test_recovery_integration.py` → scenarios 1–3 PASS.
+- [ ] **Step 4:** Re-run `python3 test/check_pow2005.py` and `python3 test/reproduce_13987.py` to confirm no regression in the earlier findings.
+- [ ] **Step 5:** Reinstall into the active environment (`python -m pip install --force-reinstall /path/to/PyLeaner`) and re-run the integration suite against the installed copy.
 
 ---
 

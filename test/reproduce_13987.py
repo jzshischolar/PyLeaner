@@ -31,7 +31,7 @@ getting the bare token on the wire, we rewrite the single serialization exit
 becomes the bare number.  Every other message is byte-for-byte unchanged.
 
 Usage:
-    python reproduce_13987.py
+    python test/reproduce_13987.py
 """
 
 import sys

@@ -52,6 +52,7 @@ from .rpc_session import (  # noqa: E402, F401
     WorkerRestartedError,
     RpcContentModifiedError,
     RpcRequestCancelledError,
+    RpcTimeoutError,
 )
 from .worker import Worker  # noqa: E402, F401
 from .watchdog import Watchdog  # noqa: E402, F401
@@ -75,4 +76,5 @@ __all__ = [
     "WorkerRestartedError",
     "RpcContentModifiedError",
     "RpcRequestCancelledError",
+    "RpcTimeoutError",
 ]

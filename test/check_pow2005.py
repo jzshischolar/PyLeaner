@@ -15,6 +15,8 @@ We test three forms, each in its own fresh session (a crash kills the server):
   #reduce -- forces kernel normalization (may not unfold @extern Nat.pow).
 
 The contrast shows which Lean construct actually triggers the crash.
+
+Run: python test/check_pow2005.py
 """
 
 import sys

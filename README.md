@@ -100,6 +100,22 @@ python examples/demo.py --proof-goal      # inspect proof state
 ```
 
 
+## Tests
+
+Tests and fault-reproduction scripts live outside the runtime package in
+`test/`:
+
+```bash
+pytest test
+python test/test_all_methods.py
+python test/test_recovery_integration.py
+python test/test_watchdog_e2e.py
+```
+
+The integration and end-to-end scripts require a working Lean toolchain and
+start real `lake serve` processes.
+
+
 Or use the API directly:
 
 ```python

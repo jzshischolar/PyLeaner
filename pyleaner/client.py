@@ -14,7 +14,8 @@ from typing import Any, Optional, Dict, TYPE_CHECKING
 
 from . import debug_log
 from .errors import ServiceUnavailable, ToxicTaskError
-from .watchdog import FATAL_RE, WEDGE_DEADLINE
+from .rpc_session import RpcTimeoutError
+from .watchdog import FATAL_RE, RESILIENT_RESPONSE_TIMEOUT
 
 if TYPE_CHECKING:
     from .pool import WorkerPool
@@ -103,8 +104,7 @@ def _submit_resilient(client: "LspClient", task_type: str, kwargs: dict,
     # robustness-critical, so we give the watchdog ample headroom over its
     # worst-case detection latency (deadline + interval = 140s) to resolve every
     # wedge via poison/attribution rather than the client bailing early.
-    min_timeout = WEDGE_DEADLINE + 60.0   # 120s deadline + 60s margin = 180s
-    effective_timeout = max(timeout, min_timeout)
+    effective_timeout = max(timeout, RESILIENT_RESPONSE_TIMEOUT)
 
     input_text = kwargs.get("text", "") if isinstance(kwargs, dict) else ""
     while True:
@@ -138,6 +138,8 @@ def _submit_resilient(client: "LspClient", task_type: str, kwargs: dict,
             while client.watchdog.server_ready.is_set():
                 time.sleep(0.5)
             continue
+        if isinstance(err, RpcTimeoutError):
+            raise err
         raise RuntimeError(str(err) or repr(err))
 
 
@@ -380,6 +382,8 @@ class LspClient:
 
         try:
             response = response_q.get(timeout=timeout)
+            if isinstance(response, ServiceUnavailable):
+                raise response
             if "error" in response:
                 raise Exception(f"Request error: {response['error']}")
             debug_log(f"Got response for {method}")
