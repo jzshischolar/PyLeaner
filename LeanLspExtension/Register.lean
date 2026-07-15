@@ -129,6 +129,7 @@ partial def isBinderNode (stx : Lean.Syntax) : Bool :=
   -- Known binder kinds in Lean 4
   kind == ``Lean.Parser.Term.explicitBinder ||
   kind == ``Lean.Parser.Term.implicitBinder ||
+  kind == ``Lean.Parser.Term.strictImplicitBinder ||
   kind == ``Lean.Parser.Term.instBinder
 
 /-- Helper: Find all binder nodes in syntax tree -/
@@ -917,6 +918,7 @@ partial def hasParametersSimple (stx : Lean.Syntax) : Bool :=
             -- Check for known binder kinds
             if k == ``Lean.Parser.Term.explicitBinder then true
             else if k == ``Lean.Parser.Term.implicitBinder then true
+            else if k == ``Lean.Parser.Term.strictImplicitBinder then true
             else if k == ``Lean.Parser.Term.instBinder then true
             -- Recursively check
             else check arg)
