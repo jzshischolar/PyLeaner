@@ -6,7 +6,7 @@ A Python interface to the Lean 4 kernel — designed for AI–Lean interactive a
 
 ## Highlights
 
-1. **Deep kernel access via native RPC.**  Unlike bridges limited to LSP, PyLeaner calls directly into Lean's kernel through its RPC extension — no shelling out, no regex on source files.
+1. **Deep kernel access via native RPC.**  Unlike bridges built around the REPL or LSP, PyLeaner communicates directly with Lean’s kernel through its RPC extension. It does not shell out to external processes or rely on regex-based source parsing, which means it can, in principle, support the full range of kernel functionality as well as user-defined Lean functions.
 
 2. **Native concurrency.**  A worker pool manages multiple Lean environments with automatic load balancing.  Tasks are routed to the least-busy worker; concurrency is transparent to the caller.
 
