@@ -56,6 +56,13 @@ The body of `def`, `abbrev`, `theorem`, `lemma`, and `example` is handled unifor
 
 The code intentionally looks for declaration-level `declValSimple` / `declValEqns` rather than recursively finding any `:=` atom. This avoids misidentifying `let x := ...` inside the body or structure field assignments as the start of the declaration body.
 
+`DeclarationInfo.bodyRange` is the LSP range of the same body syntax. For a
+`declValSimple`, it points to the body term and excludes `:=` and leading
+whitespace. Comments between `:=` and the first expression are part of both
+`bodyText` and `bodyRange`; slicing the original source with `bodyRange`
+therefore reproduces `bodyText` exactly. For equation-style declarations it covers the complete
+`declValEqns` node. It is `none` when no dedicated body syntax node exists.
+
 ## def
 
 Actual declaration node:
@@ -253,9 +260,9 @@ Extraction rules:
 | `paramsText` | `declSig.args[0]` |
 | `params` | `extractStructuredParams` traverses binders from the actual declaration node |
 | `typeText` | `declSig.args[1]`, stripping the leading `:` |
-| `bodyText` | `whereStructInst` |
+| `bodyText` | `whereStructInst`, falling back to ordinary `declValSimple` / `declValEqns` |
 
-The instance body does not go through the normal `extractBodyText`; instead it specifically looks for:
+The instance extractor first looks for:
 
 ```text
 Lean.Parser.Command.whereStructInst
@@ -269,6 +276,10 @@ instance : MyClass Nat where
 ```
 
 `bodyText` returns the structure instance field text starting from `where`.
+Instances written with ordinary declaration syntax, such as
+`instance marker : Marker := { value := 1 }`, fall back to the shared
+`extractBodyText` path. Their `bodyRange` follows the same exact-slice rule as
+other simple declaration bodies, including comments after `:=`.
 
 ## structure
 
@@ -298,8 +309,45 @@ Extraction rules:
 | `params` | `extractStructuredParams` traverses binders from the actual declaration node |
 | `typeText` | Currently always `none` |
 | `bodyText` | `extractBodyFromStructFields` extracts from the fields region |
+| `bodyRange` | Exact source span matching `bodyText`, excluding `where` but including a custom constructor/comments |
+| `fields` | Structured direct fields from the four `struct*Binder` node kinds |
 
 Currently `extractBodyFromStructFields` reads `args[4]` of the actual declaration node as the fields region for `structure`. If the field text starts with `where`, it strips `where` and returns the remaining field content.
+
+The `structFields` node contains four source binder forms:
+
+| Syntax kind | `binderKind` |
+| --- | --- |
+| `structSimpleBinder` / `structExplicitBinder` | `explicit` |
+| `structImplicitBinder` | `implicit` |
+| `structInstBinder` | `instance` |
+
+Each directly declared source field becomes a `StructureFieldInfo`. A grouped
+binder such as `(x y : α)` becomes two records with a shared binder range and
+type text. The command snapshot's elaborated environment is then used to match
+each source field to its generated projection. Structure parameters and the
+projection's structure argument are opened according to
+`ProjectionFunctionInfo.numParams + 1`; binders inside the field type itself
+are deliberately left intact. Consequently, a field of type
+`Nat → BEq Nat` is not classified as a class field merely because its result is
+a class. The residual field type is reduced to weak-head normal form, its head
+constant is checked against Lean's class registry, and `isProp` is obtained
+from Lean Meta. `isPropType` independently reports whether that reduced type is
+`Sort 0` (`Prop`), including aliases and parenthesized syntax. This distinction
+is necessary because `h : True` is proof-valued, while `goal : Prop` stores a
+proposition. PyLeaner does not use a Python or hard-coded class list.
+Inherited fields that occur only in an `extends` clause are intentionally not
+reported as directly declared fields.
+
+The elaborated structure name is resolved against the environment delta for
+the current command. Exact namespace-qualified, `_root_`, and private/mangled
+candidates are preferred; a hygienic fallback is accepted only when the delta
+contains one unique new structure. Existing same-named declarations are never
+silently associated with the source command.
+
+If structure elaboration fails, syntax-derived `name`, `typeText`,
+`binderKind`, and `range` are still returned. `projectionName`, `isClass`,
+`isProp`, and `className` remain `null`.
 
 ## class
 
@@ -324,6 +372,8 @@ Extraction rules share the same branch as `structure` and `inductive` in `extrac
 | `params` | `extractStructuredParams` traverses binders from the actual declaration node |
 | `typeText` | Currently always `none` |
 | `bodyText` | Structure-field-style body extraction path |
+| `bodyRange` | Exact source span matching `bodyText`, excluding `where` but including comments |
+| `fields` | Same structured direct-field extraction as `structure` |
 
 Note: `getActualDeclaration` already accepts `classInductive`, but `extractBodyFromStructFields` currently only lists `structure` and `inductive` in its explicit kind check. Therefore class body extraction relies on the current syntax tree falling into a compatible structure, or `classInductive` needs to be explicitly added to the field extraction check in the future.
 
@@ -372,9 +422,12 @@ The current implementation also reads `args[4]` of the actual declaration node a
 | `extractInstBinderInfo` | Handles `instBinder`, extracting instance parameters |
 | `extractTypeText` | Handles optDeclSig type extraction specifically for `definition` / `abbrev` / `example` |
 | `extractBodyText` | Extracts `declValSimple` / `declValEqns` |
-| `extractBodyFromWhereStructInst` | Extracts `whereStructInst` for instances |
+| `extractBodyFromWhereStructInst` | Extracts `whereStructInst`; ordinary `:=` instances fall back to `extractBodyText` |
 | `extractBodyFromStructFields` | Extracts field or constructor regions for structure / inductive |
+| `extractBodyRange` | Returns the syntax range corresponding to `bodyText` when available |
+| `extractParsedStructureFields` | Expands direct structure/class binders into source field records |
+| `extractElaboratedStructureFields` | Adds projection, class, and proposition metadata from the command snapshot environment |
 
 ## Relationship with Error Detection
 
-Declaration syntax tree extraction and error detection are two independent paths. Current command-level errors only use the official diagnostics from `doc.diagnosticsRef` and map them back to the command range via LSP range; declaration field extraction is still based on the node ranges of the snapshot syntax tree.
+Declaration syntax tree extraction and error detection are two independent paths. Current command-level errors only use the official diagnostics from `doc.diagnosticsRef` and map them back to the command range via LSP range. Field source extraction is based on syntax ranges, while optional field semantics comes from projection declarations in the snapshot environment. A malformed structure therefore returns diagnostics and partial source fields instead of failing the RPC request.

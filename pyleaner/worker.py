@@ -345,7 +345,12 @@ class Worker:
         )
 
     def extract_declarations(self, text, content_range) -> Any:
-        """Send lean/extractDeclarations RPC call to extract declarations."""
+        """Extract declarations after atomically updating this worker's document.
+
+        Structure and class declarations include a ``fields`` array with source
+        binder metadata plus optional elaboration metadata. All declarations
+        include ``bodyRange`` when Lean exposes an exact body syntax node.
+        """
         _ = self._didchange(text, content_range)
         return self._submit_rpc(
             {"line": 0, "character": 0},

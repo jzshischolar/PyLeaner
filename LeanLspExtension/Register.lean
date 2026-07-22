@@ -120,6 +120,8 @@ partial def getDeclarationKindFromSyntax (stx : Lean.Syntax) : RequestM (Option 
   else if keyword == "inductive" then pure (some "inductive")
   else if keyword == "abbrev" then pure (some "abbrev")
   else if keyword == "instance" then pure (some "instance")
+  else if keyword == "axiom" then pure (some "axiom")
+  else if keyword == "opaque" then pure (some "opaque")
   else pure none
 
 /-- Helper: Check if a syntax node represents a binder (parameter) -/
@@ -658,6 +660,298 @@ partial def extractBodyFromStructFields (stx : Lean.Syntax) (text : Lean.FileMap
           none)
       (fun _ => none)
 
+/-- Find the first syntax node with the requested parser kind. -/
+private partial def findSyntaxNodeByKind? (stx : Lean.Syntax) (kind : Lean.SyntaxNodeKind) : Option Lean.Syntax :=
+  if stx.getKind == kind then
+    some stx
+  else
+    stx.ifNode
+      (fun n => n.getArgs.findSome? fun arg => findSyntaxNodeByKind? arg kind)
+      (fun _ => none)
+
+/-- Convert a syntax node's canonical UTF-8 range to an LSP range. -/
+private def syntaxLspRange? (stx : Lean.Syntax) (text : Lean.FileMap) : Option Lean.Lsp.Range :=
+  stx.getRange?.map text.utf8RangeToLspRange
+
+/-- Reproduce `extractBodyFromStructFields`' whitespace/`where` trimming while
+    retaining offsets into the original document. This also covers comments
+    and an optional custom constructor before the first field. -/
+private def extractStructureBodyRange (declStx : Lean.Syntax) (text : Lean.FileMap) : Option Lean.Lsp.Range :=
+  declStx.ifNode
+    (fun n =>
+      if n.getKind != ``Lean.Parser.Command.structure || n.getArgs.size ≤ 4 then none
+      else
+        match n.getArgs[4]!.getRange? with
+        | none => none
+        | some range =>
+          let raw : Substring := ⟨text.source, range.start, range.stop⟩
+          let trimmed := raw.trim
+          let body := if trimmed.toString.startsWith "where" then
+            (trimmed.drop 5).trimLeft
+          else
+            trimmed
+          if body.isEmpty then none
+          else
+            some <| text.utf8RangeToLspRange { start := body.startPos, stop := body.stopPos })
+    (fun _ => none)
+
+/-- Reproduce `stripDeclValSimplePrefix` while retaining offsets into the
+    original document. In particular, comments between `:=` and the first term
+    syntax are part of `bodyText` and therefore part of `bodyRange`. -/
+private def extractDeclValSimpleBodyRange
+    (bodyNode : Lean.Syntax) (text : Lean.FileMap) : Option Lean.Lsp.Range :=
+  match bodyNode.getRange? with
+  | none => none
+  | some range =>
+    let raw : Substring := ⟨text.source, range.start, range.stop⟩
+    let trimmed := raw.trimLeft
+    let body := if trimmed.toString.startsWith ":=" then
+      (trimmed.drop 2).trimLeft
+    else
+      trimmed
+    if body.isEmpty then none
+    else
+      some <| text.utf8RangeToLspRange { start := body.startPos, stop := body.stopPos }
+
+/-- Extract the type portion from a `declSig` or `optDeclSig` node. -/
+private def extractTypeFromSignatureNode (sig : Lean.Syntax) (text : Lean.FileMap) : Option String :=
+  sig.ifNode
+    (fun n =>
+      let args := n.getArgs
+      if args.size < 2 then none
+      else
+        match args[1]!.getRange? with
+        | none => none
+        | some range =>
+          let rawText := String.Pos.Raw.extract text.source range.start range.stop |>.trim
+          let withoutColon := if rawText.startsWith ":" then rawText.drop 1 |>.trim else rawText
+          if withoutColon.isEmpty then none else some withoutColon)
+    (fun _ => none)
+
+/-- Direct structure field syntax before environment-based enrichment. -/
+private structure ParsedStructureField where
+  name : String
+  typeText : String
+  binderKind : String
+  range : Lean.Lsp.Range
+
+/-- Recursively collect direct `structure`/`class` field binder nodes in source order. -/
+private partial def findStructureFieldNodes (stx : Lean.Syntax) : Array Lean.Syntax :=
+  let kind := stx.getKind
+  if kind == ``Lean.Parser.Command.structExplicitBinder ||
+     kind == ``Lean.Parser.Command.structImplicitBinder ||
+     kind == ``Lean.Parser.Command.structInstBinder ||
+     kind == ``Lean.Parser.Command.structSimpleBinder then
+    #[stx]
+  else
+    stx.ifNode
+      (fun n => n.getArgs.foldl (fun acc arg => acc ++ findStructureFieldNodes arg) #[])
+      (fun _ => #[])
+
+/-- Extract one or more source fields from a structure binder. Grouped fields
+    such as `(x y : α)` become two entries sharing the binder's source range. -/
+private def extractParsedStructureFieldsFromBinder
+    (binder : Lean.Syntax) (text : Lean.FileMap) : Array ParsedStructureField :=
+  let kind := binder.getKind
+  binder.ifNode
+    (fun n =>
+      let args := n.getArgs
+      let binderKind :=
+        if kind == ``Lean.Parser.Command.structImplicitBinder then "implicit"
+        else if kind == ``Lean.Parser.Command.structInstBinder then "instance"
+        else "explicit"
+      let names : Array (Option String) :=
+        if kind == ``Lean.Parser.Command.structSimpleBinder then
+          if args.size > 1 && args[1]!.isIdent then
+            #[some (stripIdentPrefix (toString args[1]!))]
+          else #[]
+        else if args.size > 2 then
+          collectBinderNames args[2]!
+        else #[]
+      let sig? :=
+        if kind == ``Lean.Parser.Command.structSimpleBinder then
+          if args.size > 2 then some args[2]! else none
+        else if args.size > 3 then some args[3]!
+        else none
+      let typeText := sig?.bind (extractTypeFromSignatureNode · text) |>.getD ""
+      match syntaxLspRange? binder text with
+      | none => #[]
+      | some range => names.filterMap fun name? => name?.map fun name => {
+          name := name
+          typeText := typeText
+          binderKind := binderKind
+          range := range
+        })
+    (fun _ => #[])
+
+/-- Extract direct source fields from `structure` and structure-style `class`
+    declarations. This path is syntax-only and remains available when elaboration fails. -/
+private def extractParsedStructureFields (stx : Lean.Syntax) (text : Lean.FileMap) : Array ParsedStructureField :=
+  match getActualDeclaration stx with
+  | none => #[]
+  | some declStx =>
+    declStx.ifNode
+      (fun n =>
+        if n.getKind != ``Lean.Parser.Command.structure then #[]
+        else match findSyntaxNodeByKind? declStx ``Lean.Parser.Command.structFields with
+          | none => #[]
+          | some fieldsNode =>
+            (findStructureFieldNodes fieldsNode).foldl (fun fields binder =>
+              fields ++ extractParsedStructureFieldsFromBinder binder text) #[])
+      (fun _ => #[])
+
+/-- Whether this command is backed by Lean's structure parser (including the
+    ordinary `class` syntax, but excluding `class inductive`). -/
+private def isStructureLikeDeclaration (stx : Lean.Syntax) : Bool :=
+  match getActualDeclaration stx with
+  | some declStx => declStx.getKind == ``Lean.Parser.Command.structure
+  | none => false
+
+/-- Semantic metadata recovered from a generated structure projection. -/
+private structure ElaboratedStructureField where
+  name : String
+  projectionName : String
+  isClass : Bool
+  isProp : Bool
+  isPropType : Bool
+  className : Option String
+
+/-- Resolve the structure actually introduced by this command by comparing its
+    post-command environment with the preceding command snapshot. This handles
+    private/mangled and `_root_` names without ever falling back to an unrelated
+    same-named declaration already present in the environment. -/
+private def resolveIntroducedStructureName?
+    (snap : Lean.Server.Snapshots.Snapshot) (previousEnv? : Option Lean.Environment)
+    (sourceName : String) : Option Lean.Name := Id.run do
+  let env := snap.env
+  let currNamespace := snap.cmdState.scopes.head?.map (·.currNamespace) |>.getD Lean.Name.anonymous
+  let userName := if sourceName.startsWith "_root_." then
+    (sourceName.drop 7).toName
+  else
+    currNamespace ++ sourceName.toName
+  let exactCandidates := #[userName, Lean.mkPrivateName env userName]
+  let isNewStructure := fun candidate =>
+    let existedBefore := previousEnv?.any fun previousEnv => previousEnv.contains candidate
+    !existedBefore && (Lean.getStructureInfo? env candidate).isSome
+  let exactMatches := exactCandidates.filter isNewStructure
+  if exactMatches.size == 1 then
+    return exactMatches[0]?
+  else if exactMatches.size > 1 then
+    return none
+
+  -- Conservative fallback for elaborators that introduce a hygienic name not
+  -- expressible from the source identifier. Only a unique environment delta is
+  -- accepted; an existing same-named declaration is never considered.
+  let mut candidates : Array Lean.Name := #[]
+  for (candidate, _) in env.constants.map₂ do
+    if isNewStructure candidate then
+      candidates := candidates.push candidate
+  if candidates.size == 1 then candidates[0]? else none
+
+/-- Use projection types in Lean's environment to classify direct fields. Any
+    field without an elaborated projection is simply omitted from this semantic map. -/
+private def extractElaboratedStructureFields
+    (snap : Lean.Server.Snapshots.Snapshot) (previousEnv? : Option Lean.Environment)
+    (sourceName : String) : RequestM (Array ElaboratedStructureField) := do
+  let some structName := resolveIntroducedStructureName? snap previousEnv? sourceName
+    | return #[]
+  runTermElabM snap do
+    let env ← Lean.getEnv
+    let some structInfo := Lean.getStructureInfo? env structName
+      | return #[]
+    let mut result := #[]
+    for fieldName in structInfo.fieldNames do
+      let some fieldInfo := Lean.getFieldInfo? env structName fieldName
+        | continue
+      let some constantInfo := env.find? fieldInfo.projFn
+        | continue
+      let some projectionInfo := env.getProjectionFnInfo? fieldInfo.projFn
+        | continue
+      let projectionArity := projectionInfo.numParams + 1
+      let semantic? ← try
+        Lean.Meta.forallBoundedTelescope constantInfo.type (some projectionArity) fun args resultType => do
+          if args.size != projectionArity then
+            pure none
+          else
+            let reducedType ← Lean.Meta.whnf resultType
+            let className? := match reducedType.getAppFn with
+              | .const className _ =>
+                if Lean.isClass env className then some className else none
+              | _ => none
+            let isProp ← Lean.Meta.isProp resultType
+            let isPropType := match reducedType with
+              | .sort .zero => true
+              | _ => false
+            pure <| some (className?, isProp, isPropType)
+      catch _ =>
+        pure none
+      if let some (className?, isProp, isPropType) := semantic? then
+        result := result.push {
+          name := toString fieldInfo.fieldName
+          projectionName := toString fieldInfo.projFn
+          isClass := className?.isSome
+          isProp := isProp
+          isPropType := isPropType
+          className := className?.map toString
+        }
+    return result
+
+/-- Combine syntax-derived fields with optional environment semantics. -/
+private def extractStructureFields
+    (snap : Lean.Server.Snapshots.Snapshot) (previousEnv? : Option Lean.Environment)
+    (stx : Lean.Syntax) (text : Lean.FileMap) (semanticSourceName? : Option String) :
+    RequestM (Array LeanLspExtension.StructureFieldInfo) := do
+  let parsed := extractParsedStructureFields stx text
+  let elaborated ← match semanticSourceName? with
+    | some sourceName => extractElaboratedStructureFields snap previousEnv? sourceName
+    | none => pure #[]
+  return parsed.map fun field =>
+    let semantic? := elaborated.find? (·.name == field.name)
+    {
+      name := field.name
+      typeText := field.typeText
+      binderKind := field.binderKind
+      range := field.range
+      projectionName := semantic?.map (·.projectionName)
+      isClass := semantic?.map (·.isClass)
+      isProp := semantic?.map (·.isProp)
+      isPropType := semantic?.map (·.isPropType)
+      className := semantic?.bind (·.className)
+    }
+
+/-- Exact source range corresponding to `bodyText`, when the parser exposes a
+    dedicated body node. -/
+private partial def extractBodyRange
+    (kind : String) (stx : Lean.Syntax) (text : Lean.FileMap) : Option Lean.Lsp.Range :=
+  match getActualDeclaration stx with
+  | none => none
+  | some declStx =>
+    if kind == "structure" || kind == "class" then
+      extractStructureBodyRange declStx text
+    else if kind == "inductive" then
+      declStx.ifNode
+        (fun n => if n.getArgs.size > 4 then syntaxLspRange? n.getArgs[4]! text else none)
+        (fun _ => none)
+    else if kind == "instance" then
+      match findSyntaxNodeByKind? declStx ``Lean.Parser.Command.whereStructInst with
+      | some bodyNode => syntaxLspRange? bodyNode text
+      | none =>
+        match findDeclValNode? declStx with
+        | some bodyNode =>
+          if bodyNode.getKind == ``Lean.Parser.Command.declValSimple then
+            extractDeclValSimpleBodyRange bodyNode text
+          else
+            syntaxLspRange? bodyNode text
+        | none => none
+    else
+      match findDeclValNode? declStx with
+      | none => none
+      | some bodyNode =>
+        if bodyNode.getKind == ``Lean.Parser.Command.declValSimple then
+          extractDeclValSimpleBodyRange bodyNode text
+        else
+          syntaxLspRange? bodyNode text
+
 
 /-- Helper: Simple name extraction (without parameters).
     Extracts declaration name from the syntax tree.
@@ -736,6 +1030,7 @@ def extractDeclarations (_params : ExtractDeclarationsParams) : RequestM (Reques
   mapTaskCheap snapsTask fun (snaps,_) => do
     -- Extract complete declaration information from snapshots
     let mut decls := #[]
+    let mut previousEnv? : Option Lean.Environment := none
     for snap in snaps do
       let stx := snap.stx
 
@@ -764,8 +1059,13 @@ def extractDeclarations (_params : ExtractDeclarationsParams) : RequestM (Reques
           -- For theorem/lemma/instance: params and type from declSig
           let params := extractParamsFromDeclSig stx doc.meta.text
           let type := extractTypeFromDeclSig stx doc.meta.text
-          -- For instance, body is whereStructInst
-          let body := if kind == "instance" then extractBodyFromWhereStructInst stx doc.meta.text else extractBodyText stx doc.meta.text
+          -- Instances support both `where` and ordinary `:=` declaration bodies.
+          let body := if kind == "instance" then
+            match extractBodyFromWhereStructInst stx doc.meta.text with
+            | some body => some body
+            | none => extractBodyText stx doc.meta.text
+          else
+            extractBodyText stx doc.meta.text
           (params, type, body)
         else if kind == "def" || kind == "abbrev" then
           -- For def/abbrev: use optDeclSig methods
@@ -793,6 +1093,12 @@ def extractDeclarations (_params : ExtractDeclarationsParams) : RequestM (Reques
 
         -- Construct declaration info
         let structuredParams := extractStructuredParams stx doc.meta.text
+        let bodyRange := extractBodyRange kind stx doc.meta.text
+        let fields ← if isStructureLikeDeclaration stx then
+          let semanticSourceName? := if hasError then none else name
+          pure <| some (← extractStructureFields snap previousEnv? stx doc.meta.text semanticSourceName?)
+        else
+          pure none
         let declInfo : LeanLspExtension.DeclarationInfo := {
           kind := kind,
           name := name,
@@ -800,12 +1106,16 @@ def extractDeclarations (_params : ExtractDeclarationsParams) : RequestM (Reques
           params := structuredParams,
           typeText := typeText,
           bodyText := bodyText,
+          bodyRange := bodyRange,
+          fields := fields,
           fullText := fullText,
           range := lspRange,
           hasError := hasError,
           errorMessage := errorMessage
         }
         decls := decls.push declInfo
+
+      previousEnv? := some snap.env
 
     return { success := true, decls := decls }
 

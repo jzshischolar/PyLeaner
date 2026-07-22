@@ -144,8 +144,12 @@ class WorkerPool:
         Returns:
             A dict with ``{"success": bool, "decls": [...]}``.
             Each decl has ``kind``, ``name``, ``params``, ``paramsText``,
-            ``typeText``, ``bodyText``, ``fullText``, ``range``,
-            ``hasError``, ``errorMessage``.
+            ``typeText``, ``bodyText``, ``bodyRange``, ``fields``,
+            ``fullText``, ``range``, ``hasError``, ``errorMessage``.
+            ``fields`` is non-null only for structures/classes. Field source
+            data (name, type text, binder kind, range) remains available for
+            partially elaborated declarations; projection/class/Prop metadata
+            is null when Lean could not create or classify the projection.
         """
         if content_range is None:
             content_range = {

@@ -90,14 +90,31 @@ structure ParamInfo where
   binderKind : String         -- "explicit" | "implicit" | "strictImplicit" | "instance"
   deriving Lean.ToJson, Lean.FromJson
 
+/-- Structured source and elaboration information for a directly declared
+    structure/class field.  Semantic fields stay `none` when the declaration
+    did not elaborate far enough to create a projection. -/
+structure StructureFieldInfo where
+  name : String
+  typeText : String
+  binderKind : String         -- "explicit" | "implicit" | "instance"
+  range : Lean.Lsp.Range
+  projectionName : Option String := none
+  isClass : Option Bool := none
+  isProp : Option Bool := none
+  isPropType : Option Bool := none
+  className : Option String := none
+  deriving Lean.ToJson, Lean.FromJson
+
 /-- Complete information about a declaration -/
 structure DeclarationInfo where
-  kind : String  -- "def", "theorem", "lemma", "example", "structure", etc.
+  kind : String  -- "def", "theorem", "axiom", "opaque", "structure", etc.
   name : Option String  -- example has no name
   paramsText : Option String  -- "(x : Nat) (y : Nat)" (backward compat)
   params : Option (Array ParamInfo)  -- Structured parameter information
   typeText : Option String  -- "Nat", "List α", etc.
   bodyText : Option String  -- "x + y", may contain multiple lines
+  bodyRange : Option Lean.Lsp.Range := none  -- Exact source range of bodyText when available
+  fields : Option (Array StructureFieldInfo) := none  -- Only structure/class declarations
   fullText : String  -- Complete declaration text
   range : Lean.Lsp.Range  -- Declaration range in document
   hasError : Bool := false  -- Whether this declaration has syntax errors

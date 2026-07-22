@@ -128,7 +128,10 @@ TESTS = [
     (16, "debug_all_snapshots",       "debug_all_snapshots",     {}),
     (17, "debug_snapshot_info",       "debug_snapshot_info",     {}),
     (18, "changecontent (diagnostics)","changecontent",           {"text": CONTENT, "content_range": {}}),
-    (19, "get_proof_goal",            "get_proof_goal",          {"text": CONTENT, "content_range": FULL_RANGE, "position": {"line": 8, "character": 0}}, False),
+    # A position without an active tactic goal is still a successful RPC.  The
+    # public API returns ``{"proof_goal": None, "diagnostics": [...]}`` rather
+    # than failing the worker task.
+    (19, "get_proof_goal",            "get_proof_goal",          {"text": CONTENT, "content_range": FULL_RANGE, "position": {"line": 8, "character": 0}}),
 ]
 
 TESTS_MAP = {t[0]: t for t in TESTS}
