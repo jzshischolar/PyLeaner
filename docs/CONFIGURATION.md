@@ -26,6 +26,31 @@ client = LspClient(
 )
 ```
 
+### Watchdog and Worker Memory Guards
+
+On Linux systems with a systemd user manager and cgroup v2 memory controller,
+each Lean worker can be placed in an isolated transient scope:
+
+```python
+client = LspClient(
+    server_cmd=["lake", "serve"],
+    cwd="/path/to/lean/project",
+    worker_memory_high_bytes=12 * 1024**3,
+    worker_memory_max_bytes=16 * 1024**3,
+    watchdog_memory_poll_interval=1.0,
+)
+```
+
+Both memory limits must be provided together and the soft limit must be below
+the hard limit. `worker_memory_high_bytes` is observed by the dedicated
+watchdog process using anonymous RSS. `worker_memory_max_bytes` becomes the
+scope's kernel-enforced `MemoryMax`; swap is disabled for that scope so an
+offending worker cannot evade the ceiling by forcing system-wide swap
+thrashing. If the worker is killed, PyLeaner attributes the event to its
+current task, rebuilds the server and pool online, and lets innocent tasks
+retry. Omitting both values disables cgroup guards while retaining process
+liveness and deadline monitoring.
+
 ### Lean Version
 
 The required Lean version is specified in the `lean-toolchain` file at the project root. For example:

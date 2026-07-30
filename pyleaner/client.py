@@ -128,8 +128,11 @@ def _submit_resilient(client: "LspClient", task_type: str, kwargs: dict,
         err = resp.get("error", "unknown error")
         if isinstance(err, ServiceUnavailable):
             if resp.get("toxic"):
-                raise ToxicTaskError(task_type, "crashed/wedged the server",
-                                     input_text)
+                raise ToxicTaskError(
+                    task_type,
+                    str(resp.get("toxic_reason")
+                        or "crashed/wedged the server"),
+                    input_text)
             continue  # innocent -> transparent retry on the (now-current) pool
         # Pipe/connection errors mean the server process died (^C, OOM, crash).
         # Wait for the watchdog to restart, then retry — same as ServiceUnavailable
@@ -146,11 +149,22 @@ def _submit_resilient(client: "LspClient", task_type: str, kwargs: dict,
 class LspClient:
     """Simple JSON-RPC/LSP client with Lean 4 RPC support."""
 
-    def __init__(self, server_cmd: list, cwd: str = ""):
+    def __init__(
+        self,
+        server_cmd: list,
+        cwd: str = "",
+        *,
+        worker_memory_high_bytes: Optional[int] = None,
+        worker_memory_max_bytes: Optional[int] = None,
+        watchdog_memory_poll_interval: float = 1.0,
+    ):
         """Initialize the LSP client with a server command."""
         self.process: Optional[subprocess.Popen] = None
         self.server_cmd = server_cmd
         self.cwd = cwd
+        self.worker_memory_high_bytes = worker_memory_high_bytes
+        self.worker_memory_max_bytes = worker_memory_max_bytes
+        self.watchdog_memory_poll_interval = watchdog_memory_poll_interval
         self.message_id = 0
         self._id_lock = threading.Lock()
         # Route responses by message id: {msg_id: response_queue}
@@ -453,6 +467,7 @@ class LspClient:
             uri = f"file://{self.cwd or '.'}/workers/"
         self.initialize_worker_pool(size=size, init_uri=uri, init_text=text)
         self.watchdog.arm(text, size)
+        self.watchdog.attach_worker_guards()
         return self.worker_pool
 
     def submit_resilient(self, task_type: str, kwargs: dict, timeout: float = 120.0):

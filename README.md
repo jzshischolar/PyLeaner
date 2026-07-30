@@ -10,7 +10,7 @@ A Python interface to the Lean 4 kernel — designed for AI–Lean interactive a
 
 2. **Native concurrency.**  A worker pool manages multiple Lean environments with automatic load balancing.  Tasks are routed to the least-busy worker; concurrency is transparent to the caller.
 
-3. **Self-healing.**  A built-in watchdog detects crashes, wedges, and fatal errors, then restarts the full server process tree and rebuilds the pool.  `client.submit_resilient()` transparently retries innocent work and raises `ToxicTaskError` for the task that caused the failure so it is never retried blindly.
+3. **Self-healing.**  A dedicated watchdog process detects crashes, wedges, fatal errors, and per-worker memory violations, then restarts the full server process tree and rebuilds the pool.  `client.submit_resilient()` transparently retries innocent work and raises `ToxicTaskError` only for the task attributed to the failed worker, so it is never retried blindly.
 
 ## Features
 
@@ -27,7 +27,8 @@ A Python interface to the Lean 4 kernel — designed for AI–Lean interactive a
   │       Python Client (pyleaner)   │    │       Lean 4 side         │
   │                                  │    │                           │
   │  ┌──────────┐                    │    │  ┌─────────────────────┐  │
-  │  │ Watchdog ├────────────────────┼────┼──┤ lake serve          │  │
+  │  │Watchdog  ├────────────────────┼────┼──┤ lake serve          │  │
+  │  │ process  │  cgroup + monitor  │    │  │                     │  │
   │  └────┬─────┘  monitor & restart │    │  │  ├─ lean --server   │  │
   │       │                          │    │  │  └─ lean --worker   │  │
   │  ┌────┴─────┐                    │    │  └─────────────────────┘  │
@@ -122,7 +123,14 @@ Or use the API directly:
 from pyleaner import LspClient
 
 # 1. Start server + handshake
-client = LspClient(server_cmd=["lake", "serve"], cwd="/path/to/lean/project")
+client = LspClient(
+    server_cmd=["lake", "serve"],
+    cwd="/path/to/lean/project",
+    # Optional Linux/systemd protection for each Lean worker:
+    worker_memory_high_bytes=12 * 1024**3,  # watchdog soft threshold
+    worker_memory_max_bytes=16 * 1024**3,   # cgroup hard ceiling
+    watchdog_memory_poll_interval=1.0,
+)
 client.connect()
 
 # 2. Load a file
@@ -196,15 +204,17 @@ def my_new_task(self, text, ...):
 
 ## Crash Resilience
 
-A built-in **Watchdog** monitors the Lean server and auto-recovers from
-crashes, silent wedges, and fatal errors.  The caller uses
+A dedicated **Watchdog process** monitors the Lean server and auto-recovers from
+crashes, silent wedges, fatal errors, and isolated worker memory failures. The caller uses
 `client.submit_resilient()` — a drop-in replacement that transparently
 retries on the revived server and raises `ToxicTaskError` for the task
 that caused the failure (so it is never retried blindly).
 
 Key design points:
 
-- **Three detection layers**: fatal stderr (instant), task deadline (120 s), process death (20 s poll)
+- **Independent observer**: liveness, deadline, RSS, and cgroup checks run in a separate process rather than the application's worker threads.
+- **Kernel backstop**: optional per-worker systemd user scopes enforce `MemoryMax` with swap disabled, so fast memory growth remains contained even if the watchdog is temporarily unscheduled.
+- **Precise online attribution**: a deadline, worker death, or memory event marks only that worker's current task toxic; innocent in-flight and queued tasks retry on the rebuilt pool.
 - **Full process-tree restart**: kills `lake` + `lean --server` + `lean --worker`, then rebuilds the pool.  No orphaned Lean processes.
 - **Process isolation**: `lean --server` runs in its own session — terminal signals (SIGINT/SIGHUP) don't propagate to it.
 - **Orphan prevention**: six exit paths all converge on `_kill_process_tree` or `/proc` orphan scanning, plus a cron fallback every 4 hours.
