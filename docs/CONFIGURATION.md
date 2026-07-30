@@ -87,7 +87,9 @@ result = worker.extract_declarations(
 )
 ```
 
-Returns an array of `DeclarationInfo` with fields:
+Returns an object with `success`, a `decls` array, and a top-level
+`diagnostics` array collected from the same document update. Each
+`DeclarationInfo` in `decls` has fields:
 - `kind`: Declaration type ("def", "theorem", "lemma", etc.)
 - `name`: Declaration name (null for `example`)
 - `paramsText`: Raw parameter text (backward compatible)
@@ -98,6 +100,12 @@ Returns an array of `DeclarationInfo` with fields:
 - `range`: LSP range in document
 - `hasError`: Whether the declaration has errors
 - `errorMessage`: Error message if applicable
+
+The declaration-local `hasError`/`errorMessage` fields are best-effort command
+attribution and can omit document errors outside or ambiguously spanning the
+command range. Use the top-level `diagnostics` array whenever complete Lean
+error reporting is required. Existing callers that only read `success` and
+`decls` remain compatible.
 
 ### get_proof_goal
 

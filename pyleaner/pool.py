@@ -142,7 +142,10 @@ class WorkerPool:
             timeout: Max wait time in seconds.
 
         Returns:
-            A dict with ``{"success": bool, "decls": [...]}``.
+            A dict with
+            ``{"success": bool, "decls": [...], "diagnostics": [...]}``.
+            Diagnostics come from the same document update and elaboration as
+            the declarations; the additional key is backward compatible.
             Each decl has ``kind``, ``name``, ``params``, ``paramsText``,
             ``typeText``, ``bodyText``, ``bodyRange``, ``fields``,
             ``fullText``, ``range``, ``hasError``, ``errorMessage``.

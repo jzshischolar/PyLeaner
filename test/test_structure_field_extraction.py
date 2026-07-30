@@ -118,10 +118,15 @@ def client():
             pass
 
 
-def _declarations(client: LspClient, source: str) -> list[dict]:
+def _extraction(client: LspClient, source: str) -> dict:
     result = client.worker_pool.extract_declarations(source, FULL_RANGE)
     assert result["success"] is True
-    return result["decls"]
+    assert isinstance(result["diagnostics"], list)
+    return result
+
+
+def _declarations(client: LspClient, source: str) -> list[dict]:
+    return _extraction(client, source)["decls"]
 
 
 def test_structure_fields_include_source_and_environment_metadata(client):
@@ -213,9 +218,11 @@ structure Broken where
   x : Nat
   [inst : BEq
 """
-    decls = _declarations(client, source)
+    extraction = _extraction(client, source)
+    decls = extraction["decls"]
     broken = next(d for d in decls if d["name"] == "Broken")
 
+    assert any(diag.get("severity") == 1 for diag in extraction["diagnostics"])
     assert broken["hasError"] is True
     assert [f["name"] for f in broken["fields"]] == ["x", "inst"]
     assert broken["fields"][0]["typeText"] == "Nat"

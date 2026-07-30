@@ -349,14 +349,24 @@ class Worker:
 
         Structure and class declarations include a ``fields`` array with source
         binder metadata plus optional elaboration metadata. All declarations
-        include ``bodyRange`` when Lean exposes an exact body syntax node.
+        include ``bodyRange`` when Lean exposes an exact body syntax node.  The
+        response also carries the diagnostics produced by the same document
+        update, so callers do not need a second ``didChange`` merely to verify
+        that the extracted snapshot elaborated successfully.
         """
-        _ = self._didchange(text, content_range)
-        return self._submit_rpc(
+        diagnostics = self._didchange(text, content_range)
+        result = self._submit_rpc(
             {"line": 0, "character": 0},
             "LeanLspExtension.extractDeclarations",
             {},
         )
+        if isinstance(result, dict):
+            # This is deliberately a Python transport extension instead of a
+            # Loc-Decomp-specific Lean RPC field.  Existing consumers that only
+            # read ``success``/``decls`` remain source-compatible.
+            result = dict(result)
+            result["diagnostics"] = diagnostics
+        return result
 
     def debug_document(self) -> Any:
         """Send lean/debugDocument RPC call to read document content."""

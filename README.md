@@ -134,8 +134,10 @@ pool = client.create_pool(text=content, size=1)
 result = pool.extract_declarations(text=content)
 for decl in result["decls"]:
     print(f"{decl['kind']} {decl['name']}")
+# Complete document diagnostics from this same didChange are included too.
+diagnostics = result["diagnostics"]
 
-# 4. Get diagnostics
+# 4. Get diagnostics after a separate document update, when needed
 diags = pool.get_diagnostics(text=content)
 
 # 5. Get proof goal
@@ -167,11 +169,17 @@ you  →  pool.extract_declarations(text=...)
 
 Each task registered in `Worker.process_funcs` encapsulates a **content change and the corresponding information retrieval as a single atomic operation**. For example, `get_proof_goal` internally calls `_didchange` to push the latest content to Lean, then immediately calls `$/lean/plainGoal` to fetch goals — all within the same worker thread:
 
-- **`extract_declarations`** — didChange → RPC `LeanLspExtension.extractDeclarations`
+- **`extract_declarations`** — didChange → publishDiagnostics + RPC `LeanLspExtension.extractDeclarations`
 - **`get_diagnostics`** — didChange → wait for publishDiagnostics notification
 - **`get_proof_goal`** — didChange → LSP `$/lean/plainGoal`
 
 > ⚠️ Never call didChange separately and then query proof goals or declarations in a different task — the document version might have changed in between, and you'll get stale or mismatched results. Always use the pool methods that combine both steps atomically.
+
+`DeclarationInfo.hasError` and `errorMessage` are command-range attribution
+helpers, not a complete document error channel. Consumers that need a
+correctness gate should inspect the top-level `diagnostics` returned by
+`extract_declarations`; those diagnostics belong to the exact document version
+from which the declarations were extracted.
 
 ### Adding new tasks
 
