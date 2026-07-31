@@ -66,6 +66,17 @@ instance markerInstanceWhere : Marker where
   -- This comment belongs to the where-style instance body.
   value := 2
 
+local instance localMarker [inst : Marker] : BEq Nat :=
+  inferInstance
+
+scoped instance scopedMarker : Inhabited Marker :=
+  ⟨{ value := 3 }⟩
+
+noncomputable def noncomputableValue : Nat :=
+  Classical.choice (show Nonempty Nat from inferInstance)
+
+@[simp] def attributedValue : Nat := 4
+
 def use (n : Nat) : Nat :=
   n + 1
 
@@ -210,6 +221,30 @@ def test_class_fields_and_non_structure_compatibility(client):
     assert axiom_declaration["fields"] is None
     assert opaque_declaration["kind"] == "opaque"
     assert opaque_declaration["fields"] is None
+
+
+def test_declaration_modifiers_and_local_instance_extraction(client):
+    decls = _declarations(client, VALID_SOURCE)
+    local_instance = next(d for d in decls if d["name"] == "localMarker")
+    scoped_instance = next(d for d in decls if d["name"] == "scopedMarker")
+    noncomputable = next(d for d in decls if d["name"] == "noncomputableValue")
+    attributed = next(d for d in decls if d["name"] == "attributedValue")
+
+    assert local_instance["kind"] == "instance"
+    assert local_instance["modifiers"] == ["local"]
+    assert local_instance["params"] == [{
+        "name": "inst", "type": "Marker", "binderKind": "instance"
+    }]
+    assert local_instance["typeText"] == "BEq Nat"
+    assert local_instance["bodyText"] == "inferInstance"
+    assert _source_slice(
+        VALID_SOURCE, local_instance["bodyRange"]
+    ) == local_instance["bodyText"]
+
+    assert scoped_instance["kind"] == "instance"
+    assert scoped_instance["modifiers"] == ["scoped"]
+    assert noncomputable["modifiers"] == ["noncomputable"]
+    assert attributed["modifiers"] == ["attribute"]
 
 
 def test_incomplete_structure_returns_partial_syntax_fields(client):

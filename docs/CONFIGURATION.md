@@ -90,6 +90,11 @@ result = worker.extract_declarations(
 Returns an object with `success`, a `decls` array, and a top-level
 `diagnostics` array collected from the same document update. Each
 `DeclarationInfo` in `decls` has fields:
+
+- `modifiers`: optional normalized declaration modifiers. In particular,
+  `local instance` and `scoped instance` are returned as ordinary
+  `kind: "instance"` declarations with `modifiers: ["local"]` or
+  `modifiers: ["scoped"]`.
 - `kind`: Declaration type ("def", "theorem", "lemma", etc.)
 - `name`: Declaration name (null for `example`)
 - `paramsText`: Raw parameter text (backward compatible)

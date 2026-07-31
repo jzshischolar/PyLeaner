@@ -235,6 +235,12 @@ Extraction rules:
 
 ## instance
 
+The leading `Term.attrKind` is part of the actual instance syntax node.  It is
+empty for a global instance and contains `local` or `scoped` otherwise.
+Declaration kind detection therefore uses the parser node kind rather than the
+first atom: for `local instance`, the first atom is `local`, not `instance`.
+The normalized value is exposed through `DeclarationInfo.modifiers`.
+
 Actual declaration node:
 
 ```text

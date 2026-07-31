@@ -90,23 +90,42 @@ partial def findFirstIdent (stx : Lean.Syntax) : Option String :=
         ) none)
       (fun _ => none)
 
-/-- Helper function to get the leading keyword from a syntax node, specifically for declaration types.
-    Skips doc comments and modifiers by unwrapping the declaration wrapper first. -/
-partial def getDeclarationKeyword (stx : Lean.Syntax) : RequestM String := do
-  -- Unwrap `declaration` / `lemma` wrapper nodes to skip doc comments and modifiers,
-  -- then find the first atom of the actual declaration (def/theorem/lemma/...).
-  let targetStx :=
-    stx.ifNode (fun n =>
+/-- Get the actual declaration node from a declaration wrapper. Standard
+    top-level declarations are wrapped in `Lean.Parser.Command.declaration`.
+    Mathlib `lemma` is a macro command whose theorem-shaped declaration is arg 1. -/
+partial def getActualDeclaration (stx : Lean.Syntax) : Option Lean.Syntax :=
+  stx.ifNode
+    (fun n =>
       let kind := n.getKind
-      let args := n.getArgs
-      if kind == ``Lean.Parser.Command.declaration && args.size > 1 then
-        args[1]!
-      else if kind.toString == "lemma" && args.size > 1 then
-        args[1]!
+      if kind == ``Lean.Parser.Command.declaration then
+        let args := n.getArgs
+        if args.size > 1 then some (args[1]!) else none
+      else if kind.toString == "lemma" then
+        let args := n.getArgs
+        if args.size > 1 then some (args[1]!) else none
+      else if kind == ``Lean.Parser.Command.definition ||
+              kind == ``Lean.Parser.Command.structure ||
+              kind == ``Lean.Parser.Command.inductive ||
+              kind == ``Lean.Parser.Command.classInductive ||
+              kind == ``Lean.Parser.Command.theorem ||
+              kind == ``Lean.Parser.Command.instance ||
+              kind == ``Lean.Parser.Command.abbrev ||
+              kind == ``Lean.Parser.Command.example then
+        some stx
       else
-        stx
-    ) (fun _ => stx)
-  pure (findFirstAtom targetStx)
+        none)
+    (fun _ => none)
+
+/-- Helper function to get the leading keyword from a syntax node, specifically for declaration types.
+    Skips declaration modifiers by inspecting the actual declaration parser node.
+    `instance` is special: its first atom may be `local` or `scoped`. -/
+partial def getDeclarationKeyword (stx : Lean.Syntax) : RequestM String := do
+  match getActualDeclaration stx with
+  | none => pure ""
+  | some targetStx =>
+    let kind := targetStx.getKind
+    if kind == ``Lean.Parser.Command.instance then pure "instance"
+    else pure (findFirstAtom targetStx)
 
 /-- Helper function to identify declaration kind from syntax structure -/
 partial def getDeclarationKindFromSyntax (stx : Lean.Syntax) : RequestM (Option String) := do
@@ -123,6 +142,40 @@ partial def getDeclarationKindFromSyntax (stx : Lean.Syntax) : RequestM (Option 
   else if keyword == "axiom" then pure (some "axiom")
   else if keyword == "opaque" then pure (some "opaque")
   else pure none
+
+/-- Normalized declaration modifiers in source order.  This is deliberately
+    syntax-generic: callers can reason about Lean modifiers without PyLeaner
+    learning any downstream template policy.  Attributes are represented by
+    the stable tag `attribute`; their contents remain available in `fullText`. -/
+partial def extractDeclarationModifiers (stx : Lean.Syntax) : Array String :=
+  let accepted := #[
+    "private", "public", "protected", "meta", "noncomputable", "unsafe",
+    "partial", "nonrec", "local", "scoped"
+  ]
+  let rec collect (node : Lean.Syntax) (acc : Array String) : Array String :=
+    if node.getKind == ``Lean.Parser.Term.attributes then
+      acc.push "attribute"
+    else if node.isAtom then
+      let atom := node.getAtomVal.trim
+      if accepted.contains atom then acc.push atom else acc
+    else if node.isIdent then
+      acc
+    else
+      node.ifNode
+        (fun n => n.getArgs.foldl (fun result child => collect child result) acc)
+        (fun _ => acc)
+  let raw := stx.ifNode
+    (fun n =>
+      if n.getKind == ``Lean.Parser.Command.declaration then
+        let args := n.getArgs
+        let fromOuter := if args.size > 0 then collect args[0]! #[] else #[]
+        let fromActual := if args.size > 1 then collect args[1]! #[] else #[]
+        fromOuter ++ fromActual
+      else
+        collect stx #[])
+    (fun _ => #[])
+  raw.foldl (fun result modifier =>
+    if result.contains modifier then result else result.push modifier) #[]
 
 /-- Helper: Check if a syntax node represents a binder (parameter) -/
 partial def isBinderNode (stx : Lean.Syntax) : Bool :=
@@ -297,35 +350,6 @@ partial def extractParametersTextSimple (stx : Lean.Syntax) (text : Lean.FileMap
 
     if texts.isEmpty then none
     else some (String.intercalate " " texts.toList)
-
-/-- Helper: Get the actual declaration node from a declaration wrapper.
-    Standard top-level declarations are wrapped in `Lean.Parser.Command.declaration`.
-    Mathlib `lemma` is a macro command whose theorem-shaped declaration is arg 1.
--/
-partial def getActualDeclaration (stx : Lean.Syntax) : Option Lean.Syntax :=
-  stx.ifNode
-    (fun n =>
-      let kind := n.getKind
-      if kind == ``Lean.Parser.Command.declaration then
-        let args := n.getArgs
-        if args.size > 1 then some (args[1]!)
-        else none
-      else if kind.toString == "lemma" then
-        let args := n.getArgs
-        if args.size > 1 then some (args[1]!)
-        else none
-      else if kind == ``Lean.Parser.Command.definition ||
-              kind == ``Lean.Parser.Command.structure ||
-              kind == ``Lean.Parser.Command.inductive ||
-              kind == ``Lean.Parser.Command.classInductive ||
-              kind == ``Lean.Parser.Command.theorem ||
-              kind == ``Lean.Parser.Command.instance ||
-              kind == ``Lean.Parser.Command.abbrev ||
-              kind == ``Lean.Parser.Command.example then
-        some stx
-      else
-        none)
-    (fun _ => none)
 
 /-- Helper: Extract structured parameter info from a declaration's signature.
     Works uniformly across all declaration kinds by finding declSig/optDeclSig.
@@ -963,8 +987,20 @@ partial def extractDeclarationNameSimple (stx : Lean.Syntax) : RequestM (Option 
   if keyword == "example" then
     pure none
   else
-    -- For named declarations, find the first ident and strip the prefix
-    match findFirstIdent stx with
+    let name? := match getActualDeclaration stx with
+      | none => none
+      | some declStx =>
+        if declStx.getKind == ``Lean.Parser.Command.instance then
+          -- instance args are: attrKind, `instance`, priority, optional declId,
+          -- declSig, declVal. Do not mistake the first binder for an unnamed
+          -- instance's declaration name.
+          declStx.ifNode
+            (fun n => if n.getArgs.size > 3 then findFirstIdent n.getArgs[3]! else none)
+            (fun _ => none)
+        else
+          findFirstIdent declStx
+    -- For named declarations, strip the rendering prefix from the source ident.
+    match name? with
     | some name =>
       -- Strip the Lean identifier backtick prefix
       if name.startsWith "`" then
@@ -1102,6 +1138,7 @@ def extractDeclarations (_params : ExtractDeclarationsParams) : RequestM (Reques
         let declInfo : LeanLspExtension.DeclarationInfo := {
           kind := kind,
           name := name,
+          modifiers := some (extractDeclarationModifiers stx),
           paramsText := paramsText,
           params := structuredParams,
           typeText := typeText,

@@ -258,6 +258,7 @@ Main client for communicating with the Lean 4 LSP server.
 {
   "kind": "def",
   "name": "add",
+  "modifiers": [],
   "paramsText": "(x : Nat) (y : Nat)",
   "params": [
     {"name": "x", "type": "Nat", "binderKind": "explicit"},
@@ -273,6 +274,13 @@ Main client for communicating with the Lean 4 LSP server.
   "errorMessage": null
 }
 ```
+
+`modifiers` is an additive optional field containing normalized declaration
+modifiers in source order.  It may contain `local`, `scoped`, `private`,
+`public`, `protected`, `meta`, `noncomputable`, `unsafe`, `partial`, `nonrec`,
+or the stable tag `attribute` when a declaration has an attribute block.  A
+plain global declaration has an empty array.  Attribute contents remain in
+`fullText`.
 
 
 ### ParamInfo

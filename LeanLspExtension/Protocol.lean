@@ -109,6 +109,7 @@ structure StructureFieldInfo where
 structure DeclarationInfo where
   kind : String  -- "def", "theorem", "axiom", "opaque", "structure", etc.
   name : Option String  -- example has no name
+  modifiers : Option (Array String) := none  -- normalized source modifiers, e.g. local/noncomputable/attribute
   paramsText : Option String  -- "(x : Nat) (y : Nat)" (backward compat)
   params : Option (Array ParamInfo)  -- Structured parameter information
   typeText : Option String  -- "Nat", "List α", etc.
