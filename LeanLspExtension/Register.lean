@@ -7,6 +7,7 @@ import Lean.Server.FileWorker
 import Lean.Server.Snapshots
 import Lean.Parser.Command
 import Lean.Syntax
+import Lean.Data.EditDistance
 import LeanLspExtension.Protocol
 
 namespace LeanLspExtension
@@ -1155,6 +1156,104 @@ def extractDeclarations (_params : ExtractDeclarationsParams) : RequestM (Reques
       previousEnv? := some snap.env
 
     return { success := true, decls := decls }
+
+/-- Stable coarse declaration kind used by generic environment search. -/
+private def constantKind (info : Lean.ConstantInfo) : String :=
+  match info with
+  | .axiomInfo _ => "axiom"
+  | .defnInfo _ => "def"
+  | .thmInfo _ => "theorem"
+  | .opaqueInfo _ => "opaque"
+  | .quotInfo _ => "quotient"
+  | .ctorInfo _ => "constructor"
+  | .recInfo _ => "recursor"
+  | .inductInfo _ => "inductive"
+
+/-- Last component of a fully-qualified Lean declaration name. -/
+private def declarationBaseName (name : Lean.Name) : String :=
+  match name with
+  | .str _ value => value
+  | .num parent value => s!"{declarationBaseName parent}.{value}"
+  | .anonymous => ""
+
+/-- Small, general casing variants that can be resolved with O(1) environment
+    lookup before considering a full fuzzy scan. -/
+private def declarationNameVariants (query : String) : Array Lean.Name :=
+  let segmentVariants := fun (segment : String) =>
+    #[segment, segment.capitalize, segment.decapitalize]
+  let variants := query.trim.splitOn "." |>.foldl (fun prefixes segment =>
+    prefixes.foldl (fun result stem =>
+      segmentVariants segment |>.foldl (fun inner part =>
+        let value := if stem.isEmpty then part else stem ++ "." ++ part
+        if inner.contains value then inner else inner.push value
+      ) result
+    ) #[]
+  ) #[""]
+  variants.map String.toName
+
+/-- Case-insensitive edit-distance score. Exact full/base-name matches sort
+    first.  Comparing both representations makes this useful for casing and
+    namespace mistakes without embedding a library-specific name table. -/
+private def declarationSearchScore (query : String) (name : Lean.Name) : Option Nat :=
+  let normalizedQuery := query.trim.toLower
+  if normalizedQuery.isEmpty then none
+  else
+    let full := name.toString (escape := false) |>.toLower
+    let base := declarationBaseName name |>.toLower
+    if normalizedQuery == full || normalizedQuery == base then
+      some 0
+    else
+      let cutoff := min 8 (max 2 (normalizedQuery.length / 2 + 1))
+      let fullDistance := Lean.EditDistance.levenshtein normalizedQuery full cutoff
+      let baseDistance := Lean.EditDistance.levenshtein normalizedQuery base cutoff
+      match fullDistance, baseDistance with
+      | some left, some right => some (min left right + 1)
+      | some distance, none | none, some distance => some (distance + 1)
+      | none, none => none
+
+/-- Insert a scored name while retaining only the best bounded result set. -/
+private def insertSearchCandidate
+    (items : Array (Nat × Lean.Name × Lean.ConstantInfo))
+    (item : Nat × Lean.Name × Lean.ConstantInfo)
+    (limit : Nat) : Array (Nat × Lean.Name × Lean.ConstantInfo) :=
+  if limit == 0 then #[]
+  else
+    let sorted := (items.push item).qsort fun left right =>
+      left.1 < right.1 ||
+        (left.1 == right.1 && left.2.1.toString < right.2.1.toString)
+    if sorted.size <= limit then sorted else sorted.extract 0 limit
+
+/-- RPC handler for lean/searchDeclarations.  It searches the final elaborated
+    document environment and pretty-prints only the bounded best matches. -/
+@[server_rpc_method]
+def searchDeclarations (params : SearchDeclarationsParams) : RequestM (RequestTask SearchDeclarationsResult) := do
+  let doc ← readDoc
+  let snapsTask := doc.cmdSnaps.waitAll
+  mapTaskCheap snapsTask fun (snaps, _) => do
+    let some snap := snaps.getLast?
+      | return { success := true, query := params.query, candidates := #[] }
+    let limit := min params.maxResults 32
+    let mut ranked : Array (Nat × Lean.Name × Lean.ConstantInfo) := #[]
+    for name in declarationNameVariants params.query do
+      if let some info := snap.env.find? name then
+        ranked := insertSearchCandidate ranked (0, name, info) limit
+    -- A fuzzy scan is explicit because traversing a large imported Mathlib
+    -- environment is materially more expensive than direct name resolution.
+    if ranked.isEmpty && params.fuzzy then
+      for (name, info) in snap.env.constants.toList do
+        if !name.isInternal then
+          if let some score := declarationSearchScore params.query name then
+            ranked := insertSearchCandidate ranked (score, name, info) limit
+    let candidates ← runTermElabM snap do
+      ranked.mapM fun (score, name, info) => do
+        let renderedType ← Lean.Meta.ppExpr info.type
+        pure {
+          name := name.toString (escape := false)
+          typeText := renderedType.pretty
+          kind := constantKind info
+          score := score
+        }
+    return { success := true, query := params.query, candidates := candidates }
 
 
 

@@ -132,6 +132,7 @@ TESTS = [
     # public API returns ``{"proof_goal": None, "diagnostics": [...]}`` rather
     # than failing the worker task.
     (19, "get_proof_goal",            "get_proof_goal",          {"text": CONTENT, "content_range": FULL_RANGE, "position": {"line": 8, "character": 0}}),
+    (20, "search_declarations",       "search_declarations",     {"text": CONTENT, "query": "HasParams", "max_results": 5, "fuzzy": False, "content_range": FULL_RANGE}),
 ]
 
 TESTS_MAP = {t[0]: t for t in TESTS}

@@ -132,6 +132,30 @@ structure ExtractDeclarationsResult where
   decls : Array DeclarationInfo
   deriving Lean.ToJson, Lean.FromJson
 
+/-- Generic environment declaration search parameters.  The query is matched
+    against fully-qualified names and final name components; no downstream
+    domain policy is applied by this RPC. -/
+structure SearchDeclarationsParams where
+  query : String
+  maxResults : Nat := 8
+  fuzzy : Bool := false
+  deriving Lean.ToJson, Lean.FromJson
+
+/-- One declaration candidate from the elaborated environment. -/
+structure DeclarationSearchCandidate where
+  name : String
+  typeText : String
+  kind : String
+  score : Nat
+  deriving Lean.ToJson, Lean.FromJson
+
+/-- Response for lean/searchDeclarations. -/
+structure SearchDeclarationsResult where
+  success : Bool
+  query : String
+  candidates : Array DeclarationSearchCandidate
+  deriving Lean.ToJson, Lean.FromJson
+
 /-- Request parameters for lean/testHasParams -/
 structure TestHasParamsParams where
   deriving Lean.ToJson, Lean.FromJson

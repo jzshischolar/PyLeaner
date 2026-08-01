@@ -137,13 +137,22 @@ for decl in result["decls"]:
 # Complete document diagnostics from this same didChange are included too.
 diagnostics = result["diagnostics"]
 
-# 4. Get diagnostics after a separate document update, when needed
+# 4. Search the exact elaborated environment for a misspelled declaration
+matches = pool.search_declarations(
+    text=content, query="hasparam", max_results=8
+)
+for candidate in matches["candidates"]:
+    print(candidate["name"], candidate["typeText"])
+# Opt into a more expensive full-environment fuzzy scan only when needed:
+# matches = pool.search_declarations(text=content, query="typo", fuzzy=True)
+
+# 5. Get diagnostics after a separate document update, when needed
 diags = pool.get_diagnostics(text=content)
 
-# 5. Get proof goal
+# 6. Get proof goal
 goals = pool.get_proof_goal(text=content, position={"line": 10, "character": 4})
 
-# 6. Cleanup
+# 7. Cleanup
 client.shutdown()
 client.exit()
 ```
@@ -170,6 +179,7 @@ you  →  pool.extract_declarations(text=...)
 Each task registered in `Worker.process_funcs` encapsulates a **content change and the corresponding information retrieval as a single atomic operation**. For example, `get_proof_goal` internally calls `_didchange` to push the latest content to Lean, then immediately calls `$/lean/plainGoal` to fetch goals — all within the same worker thread:
 
 - **`extract_declarations`** — didChange → publishDiagnostics + RPC `LeanLspExtension.extractDeclarations`
+- **`search_declarations`** — didChange → RPC `LeanLspExtension.searchDeclarations`
 - **`get_diagnostics`** — didChange → wait for publishDiagnostics notification
 - **`get_proof_goal`** — didChange → LSP `$/lean/plainGoal`
 
@@ -247,6 +257,7 @@ Main client for communicating with the Lean 4 LSP server.
 | Method | Description |
 |--------|-------------|
 | `extract_declarations(text, ...)` | Extract all declarations with structured params |
+| `search_declarations(text, query, ...)` | Search current environment names and return real type signatures |
 | `get_diagnostics(text, ...)` | Get Lean compiler diagnostics |
 | `get_proof_goal(text, position, ...)` | Get proof goal state at a position |
 | `ping()` | RPC round-trip test |

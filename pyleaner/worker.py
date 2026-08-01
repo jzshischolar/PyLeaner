@@ -63,6 +63,7 @@ class Worker:
             "test_declaration_kind": self.test_declaration_kind,
             "test_declaration_name": self.test_declaration_name,
             "extract_declarations": self.extract_declarations,
+            "search_declarations": self.search_declarations,
             "test_has_params": self.test_has_params,
             "test_params_text": self.test_params_text,
             "test_type_text": self.test_type_text,
@@ -364,6 +365,26 @@ class Worker:
             # This is deliberately a Python transport extension instead of a
             # Loc-Decomp-specific Lean RPC field.  Existing consumers that only
             # read ``success``/``decls`` remain source-compatible.
+            result = dict(result)
+            result["diagnostics"] = diagnostics
+        return result
+
+    def search_declarations(
+        self, text, query, max_results=8, fuzzy=False, content_range=None
+    ) -> Any:
+        """Search the current elaborated environment for declaration names.
+
+        The document is updated first so local declarations and imports match
+        the diagnostics being repaired.  Matching and type pretty-printing are
+        performed by Lean; Python adds no domain-specific aliases.
+        """
+        diagnostics = self._didchange(text, content_range or {})
+        result = self._submit_rpc(
+            {"line": 0, "character": 0},
+            "LeanLspExtension.searchDeclarations",
+            {"query": query, "maxResults": max_results, "fuzzy": fuzzy},
+        )
+        if isinstance(result, dict):
             result = dict(result)
             result["diagnostics"] = diagnostics
         return result

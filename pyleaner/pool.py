@@ -163,6 +163,21 @@ class WorkerPool:
             "text": text, "content_range": content_range,
         }, timeout=timeout)
 
+    def search_declarations(
+        self, text: str, query: str, max_results: int = 8, fuzzy: bool = False,
+        content_range: dict | None = None, timeout: float = 60.0
+    ) -> Any:
+        """Return bounded declaration-name matches from Lean's environment."""
+        if max_results < 1:
+            raise ValueError("max_results must be at least one")
+        return self._submit("search_declarations", {
+            "text": text,
+            "query": query,
+            "max_results": max_results,
+            "fuzzy": fuzzy,
+            "content_range": content_range or {},
+        }, timeout=timeout)
+
     def get_diagnostics(
         self, text: str, content_range: dict | None = None,
         timeout: float = 60.0
