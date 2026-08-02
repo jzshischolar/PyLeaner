@@ -965,6 +965,137 @@ private def resolveIntroducedDeclarationName?
       env.contains candidate &&
         !(previousEnv?.any fun previousEnv => previousEnv.contains candidate)
 
+/-- Stable coarse kind for any constant in an environment delta. -/
+private def environmentConstantKind (info : Lean.ConstantInfo) : String :=
+  match info with
+  | .axiomInfo _ => "axiom"
+  | .defnInfo _ => "def"
+  | .thmInfo _ => "theorem"
+  | .opaqueInfo _ => "opaque"
+  | .quotInfo _ => "quotient"
+  | .ctorInfo _ => "constructor"
+  | .recInfo _ => "recursor"
+  | .inductInfo _ => "inductive"
+
+/-- Return a constant's body references when its environment representation
+    carries a value.  Opaque declarations expose their value separately. -/
+private def environmentValueReferences (info : Lean.ConstantInfo) : Array String :=
+  let value? := match info with
+    | .opaqueInfo value => some value.value
+    | _ => info.value?
+  value?.map (·.getUsedConstants.map toString) |>.getD #[]
+
+/-- All new constant names between the command's preceding and following
+    snapshots.  A missing preceding snapshot is deliberately incomplete rather
+    than treating the imported environment as generated source. -/
+private def environmentDeltaNames
+    (env : Lean.Environment) (previousEnv? : Option Lean.Environment) : Array Lean.Name :=
+  match previousEnv? with
+  | none => #[]
+  | some previousEnv => Id.run do
+    let mut names := #[]
+    for (name, _) in env.constants.map₂ do
+      if !previousEnv.contains name then
+        names := names.push name
+    return names.qsort fun left right =>
+      left.toString (escape := false) < right.toString (escape := false)
+
+/-- Rebind generated instance telescopes with deterministic, parseable local
+    names. Elaborator-generated declarations often retain hygienic macro-scope
+    names which are useful internally but cannot be pasted into a Lean probe.
+    This is an expression-level fvar substitution, not pretty-printed text
+    rewriting, so dependent parameter types and the final target stay aligned. -/
+private partial def renderInstanceTelescopeAux
+    (env : Lean.Environment) (parameters : Array Lean.Expr) (target : Lean.Expr)
+    (index : Nat) (oldFVars newFVars : Array Lean.Expr)
+    (result : Array LeanLspExtension.ParamInfo) :
+    Lean.MetaM (Array LeanLspExtension.ParamInfo × String × Option String) := do
+  if index < parameters.size then
+    let oldFVar := parameters[index]!
+    let declaration ← Lean.Meta.getFVarLocalDecl oldFVar
+    let parameterType := declaration.type.replaceFVars oldFVars newFVars
+    let freshName := Lean.Name.mkSimple s!"_p{index}"
+    Lean.Meta.withLocalDecl freshName declaration.binderInfo parameterType fun newFVar => do
+      let renderedType ← Lean.Meta.ppExpr parameterType
+      let binderKind := match declaration.binderInfo with
+        | .default => "explicit"
+        | .implicit => "implicit"
+        | .strictImplicit => "strictImplicit"
+        | .instImplicit => "instance"
+      renderInstanceTelescopeAux env parameters target (index + 1)
+        (oldFVars.push oldFVar) (newFVars.push newFVar)
+        (result.push {
+          name := some (freshName.toString (escape := false))
+          type := some renderedType.pretty
+          binderKind := binderKind
+        })
+  else
+    let reboundTarget := target.replaceFVars oldFVars newFVars
+    let renderedTarget ← Lean.Meta.ppExpr reboundTarget
+    let className? := match reboundTarget.getAppFn with
+      | .const className _ =>
+        if Lean.isClass env className then
+          some (className.toString (escape := false))
+        else
+          none
+      | _ => none
+    pure (result, renderedTarget.pretty, className?)
+
+private def renderInstanceTelescope
+    (env : Lean.Environment) (parameters : Array Lean.Expr) (target : Lean.Expr) :
+    Lean.MetaM (Array LeanLspExtension.ParamInfo × String × Option String) :=
+  renderInstanceTelescopeAux env parameters target 0 #[] #[] #[]
+
+/-- Extract generic elaborated metadata for every constant introduced by one
+    source command. Attribute reporting is intentionally semantic: class and
+    instance registration are queried from Lean's environment instead of
+    guessed from declaration names or downstream policy. -/
+private def extractEnvironmentDelta
+    (snap : Lean.Server.Snapshots.Snapshot) (previousEnv? : Option Lean.Environment)
+    (primaryName? : Option Lean.Name) (sourceName? : Option String)
+    (sourceRange : Lean.Lsp.Range) :
+    RequestM (Array LeanLspExtension.EnvironmentDeclarationInfo) := do
+  let names := environmentDeltaNames snap.env previousEnv?
+  runTermElabM snap do
+    let env ← Lean.getEnv
+    names.mapM fun name => do
+      let some info := env.find? name
+        | throwError m!"environment delta constant `{name}` disappeared"
+      let renderedType ← Lean.Meta.ppExpr info.type
+      let instanceState := Lean.Meta.instanceExtension.getState env
+      let instanceEntry? := instanceState.instanceNames.find? name
+      let isInstance := instanceEntry?.isSome
+      let isClass := Lean.isClass env name
+      let (instanceParameters, instanceTargetText, instanceClassName) ←
+        if isInstance then
+          Lean.Meta.forallTelescopeReducing info.type fun parameters target => do
+            let (renderedParameters, renderedTarget, className?) ←
+              renderInstanceTelescope env parameters target
+            pure (some renderedParameters, some renderedTarget, className?)
+        else
+          pure (none, none, none)
+      let attributes :=
+        (if isClass then #["class"] else #[]) ++
+        (if isInstance then #["instance"] else #[])
+      pure {
+        name := name.toString (escape := false)
+        kind := environmentConstantKind info
+        typeText := renderedType.pretty
+        levelParams := (info.levelParams.map toString).toArray
+        typeReferences := info.type.getUsedConstants.map toString
+        valueReferences := environmentValueReferences info
+        attributes := attributes
+        isInstance := isInstance
+        instancePriority := instanceEntry?.map (·.priority)
+        instanceScope := instanceEntry?.map (toString ·.attrKind)
+        instanceParameters := instanceParameters
+        instanceTargetText := instanceTargetText
+        instanceClassName := instanceClassName
+        isPrimary := primaryName? == some name
+        sourceDeclaration := sourceName?
+        sourceRange := sourceRange
+      }
+
 /-- Recover elaborated universe parameters for the declaration introduced by
     one source command. This is generic declaration metadata: consumers decide
     how universe parameters participate in their own protocols. -/
@@ -1200,6 +1331,12 @@ def extractDeclarations (_params : ExtractDeclarationsParams) : RequestM (Reques
           pure <| some (← extractStructureFields snap previousEnv? stx doc.meta.text semanticSourceName?)
         else
           pure none
+        let primaryName? :=
+          resolveIntroducedDeclarationName? snap previousEnv? stx name
+        let environmentDelta ←
+          extractEnvironmentDelta snap previousEnv? primaryName? name lspRange
+        let generatedDeclarations :=
+          environmentDelta.filter fun declaration => !declaration.isPrimary
         let declInfo : LeanLspExtension.DeclarationInfo := {
           kind := kind,
           name := name,
@@ -1213,6 +1350,9 @@ def extractDeclarations (_params : ExtractDeclarationsParams) : RequestM (Reques
           bodyText := bodyText,
           bodyRange := bodyRange,
           fields := fields,
+          environmentDelta := some environmentDelta,
+          generatedDeclarations := some generatedDeclarations,
+          environmentDeltaComplete := some (previousEnv?.isSome && !hasError),
           fullText := fullText,
           range := lspRange,
           hasError := hasError,
@@ -1226,15 +1366,7 @@ def extractDeclarations (_params : ExtractDeclarationsParams) : RequestM (Reques
 
 /-- Stable coarse declaration kind used by generic environment search. -/
 private def constantKind (info : Lean.ConstantInfo) : String :=
-  match info with
-  | .axiomInfo _ => "axiom"
-  | .defnInfo _ => "def"
-  | .thmInfo _ => "theorem"
-  | .opaqueInfo _ => "opaque"
-  | .quotInfo _ => "quotient"
-  | .ctorInfo _ => "constructor"
-  | .recInfo _ => "recursor"
-  | .inductInfo _ => "inductive"
+  environmentConstantKind info
 
 /-- Last component of a fully-qualified Lean declaration name. -/
 private def declarationBaseName (name : Lean.Name) : String :=

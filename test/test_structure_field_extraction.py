@@ -37,6 +37,15 @@ class Operations (α : Type v) where
   op : α → α
   op_law : ∀ x, op x = op x
 
+inductive DerivedColor where
+  | red
+  | blue
+  deriving DecidableEq, Repr
+
+inductive DerivedWrapper (α : Type) where
+  | wrap (value : α)
+  deriving Repr
+
 structure WithCtor where mk ::
   -- The body range must include constructor syntax and comments.
   value : Nat
@@ -260,6 +269,68 @@ def test_declaration_modifiers_and_local_instance_extraction(client):
     assert attributed["modifiers"] == ["attribute"]
 
 
+def test_environment_delta_audits_generated_and_instance_declarations(client):
+    decls = _declarations(client, VALID_SOURCE)
+    derived = next(d for d in decls if d["name"] == "DerivedColor")
+    local_instance = next(d for d in decls if d["name"] == "localMarker")
+    global_instance = next(d for d in decls if d["name"] == "markerInstance")
+
+    assert derived["environmentDeltaComplete"] is True
+    delta = derived["environmentDelta"]
+    generated = derived["generatedDeclarations"]
+    assert len([item for item in delta if item["isPrimary"]]) == 1
+    assert {item["name"] for item in generated} == {
+        item["name"] for item in delta if not item["isPrimary"]
+    }
+    assert all(item["sourceDeclaration"] == "DerivedColor" for item in delta)
+    assert all(item["sourceRange"] == derived["range"] for item in delta)
+    assert {"constructor", "recursor"}.issubset({item["kind"] for item in generated})
+
+    deriving_instances = [
+        item for item in generated
+        if item["isInstance"] and (
+            "DecidableEq" in item["typeText"] or "Repr" in item["typeText"]
+        )
+    ]
+    assert len(deriving_instances) == 2
+    assert all(item["attributes"] == ["instance"] for item in deriving_instances)
+    assert all(item["instancePriority"] == 1000 for item in deriving_instances)
+    assert all(item["instanceScope"] == "global" for item in deriving_instances)
+    assert {item["instanceClassName"] for item in deriving_instances} == {
+        # DecidableEq reduces to a provider whose ultimate target is Decidable.
+        "Decidable", "Repr"
+    }
+    assert all(item["instanceTargetText"] for item in deriving_instances)
+    assert all(item["typeReferences"] for item in deriving_instances)
+    assert all(item["valueReferences"] for item in deriving_instances)
+
+    local_primary = next(
+        item for item in local_instance["environmentDelta"] if item["isPrimary"]
+    )
+    global_primary = next(
+        item for item in global_instance["environmentDelta"] if item["isPrimary"]
+    )
+    assert local_primary["isInstance"] is True
+    assert local_primary["instanceScope"] == "local"
+    assert local_primary["instancePriority"] == 1000
+    assert local_primary["instanceClassName"] == "BEq"
+    assert local_primary["instanceTargetText"] == "BEq Nat"
+    assert global_primary["isInstance"] is True
+    assert global_primary["instanceScope"] == "global"
+    assert global_primary["instancePriority"] == 1000
+
+    wrapper = next(d for d in decls if d["name"] == "DerivedWrapper")
+    wrapper_repr = next(
+        item for item in wrapper["generatedDeclarations"]
+        if item["isInstance"] and item["instanceClassName"] == "Repr"
+    )
+    assert wrapper_repr["instanceParameters"] == [
+        {"name": "_p0", "type": "Type", "binderKind": "implicit"},
+        {"name": "_p1", "type": "Repr _p0", "binderKind": "instance"},
+    ]
+    assert wrapper_repr["instanceTargetText"] == "Repr (DerivedWrapper _p0)"
+
+
 def test_incomplete_structure_returns_partial_syntax_fields(client):
     source = """import LeanLspExtension
 structure Broken where
@@ -272,12 +343,27 @@ structure Broken where
 
     assert any(diag.get("severity") == 1 for diag in extraction["diagnostics"])
     assert broken["hasError"] is True
+    assert broken["environmentDeltaComplete"] is False
     assert [f["name"] for f in broken["fields"]] == ["x", "inst"]
     assert broken["fields"][0]["typeText"] == "Nat"
     assert broken["fields"][0]["projectionName"] is None
     assert broken["fields"][0]["isClass"] is None
     assert broken["fields"][0]["isProp"] is None
     assert broken["fields"][0]["isPropType"] is None
+
+
+def test_incomplete_deriving_reports_diagnostics_and_incomplete_delta(client):
+    source = """import LeanLspExtension
+inductive BrokenDerived where
+  | value
+  deriving
+"""
+    extraction = _extraction(client, source)
+    broken = next(d for d in extraction["decls"] if d["name"] == "BrokenDerived")
+    assert any(diag.get("severity") == 1 for diag in extraction["diagnostics"])
+    assert broken["hasError"] is True
+    assert broken["environmentDeltaComplete"] is False
+    assert isinstance(broken["generatedDeclarations"], list)
 
 
 def test_ranges_are_recomputed_after_document_change(client):

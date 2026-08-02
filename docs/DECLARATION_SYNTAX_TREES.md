@@ -433,7 +433,23 @@ The current implementation also reads `args[4]` of the actual declaration node a
 | `extractBodyRange` | Returns the syntax range corresponding to `bodyText` when available |
 | `extractParsedStructureFields` | Expands direct structure/class binders into source field records |
 | `extractElaboratedStructureFields` | Adds projection, class, and proposition metadata from the command snapshot environment |
+| `extractEnvironmentDelta` | Compares the environment before/after a command and reports primary/generated constants with elaborated type, reference, and instance metadata |
 
 ## Relationship with Error Detection
 
 Declaration syntax tree extraction and error detection are two independent paths. Current command-level errors only use the official diagnostics from `doc.diagnosticsRef` and map them back to the command range via LSP range. This attribution is intentionally best-effort: `DeclarationInfo.hasError` and `errorMessage` are not guaranteed to contain every document error. The Python `extract_declarations` response therefore also exposes the complete top-level `publishDiagnostics` list from the same `didChange`; correctness-sensitive callers should use that list. Field source extraction is based on syntax ranges, while optional field semantics comes from projection declarations in the snapshot environment. A malformed structure therefore returns diagnostics and partial source fields instead of failing the RPC request.
+
+Environment-delta extraction is similarly conservative. A declaration with no
+preceding command snapshot or with an attributed error returns
+`environmentDeltaComplete: false`; callers must not treat its generated
+declaration list as exhaustive. Generated constants inherit the source
+declaration's command range because Lean-generated declarations generally have
+no independent source syntax. Instance priority and scope come from Lean's
+instance extension. Only semantic class/instance registrations are exposed as
+portable attributes; arbitrary attributes may be stored by their own extension
+and are not represented as a complete universal attribute list.
+
+For an instance constant, PyLeaner also opens its elaborated forall telescope
+and returns structured `instanceParameters`, the remaining
+`instanceTargetText`, and a Lean-validated `instanceClassName`. This permits
+callers to build scoped synthesis probes without parsing pretty-printed types.

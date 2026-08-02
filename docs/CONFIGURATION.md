@@ -126,6 +126,14 @@ Returns an object with `success`, a `decls` array, and a top-level
 - `params`: Structured parameter array (`ParamInfo`)
 - `typeText`: Return type text
 - `bodyText`: Body text
+- `bodyRange`: Exact source range for `bodyText`, when available
+- `fields`: Structured source and elaborated metadata for `structure`/`class`
+- `environmentDelta`: Every elaborated constant introduced by this source
+  command, including the primary declaration, constructors, projections,
+  recursors, equation declarations, and `deriving` output
+- `generatedDeclarations`: The non-primary subset of `environmentDelta`
+- `environmentDeltaComplete`: `true` only when a preceding environment
+  snapshot exists and the source command has no attributed error
 - `fullText`: Complete declaration source text
 - `range`: LSP range in document
 - `hasError`: Whether the declaration has errors
@@ -136,6 +144,16 @@ attribution and can omit document errors outside or ambiguously spanning the
 command range. Use the top-level `diagnostics` array whenever complete Lean
 error reporting is required. Existing callers that only read `success` and
 `decls` remain compatible.
+
+Each environment-delta item includes its elaborated name, coarse constant kind,
+type, universe parameters, type/body references, source declaration and command
+range. `isInstance`, `instancePriority`, and `instanceScope` are read from
+Lean's instance extension. For registered instances, `instanceTargetText` is
+the target after introducing provider parameters and `instanceClassName` is its
+Lean-validated head class; `instanceParameters` preserves those introduced
+parameters and their binder kinds. Class and instance registration are also
+reported in `attributes`. Attribute extensions in Lean may use extension-specific storage,
+so `attributes` is not claimed to enumerate every arbitrary user attribute.
 
 ### get_proof_goal
 

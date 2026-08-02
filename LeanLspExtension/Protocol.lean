@@ -105,6 +105,29 @@ structure StructureFieldInfo where
   className : Option String := none
   deriving Lean.ToJson, Lean.FromJson
 
+/-- One constant introduced into Lean's environment while elaborating a source
+    declaration.  The command range/source name provide provenance for constants
+    without their own source declaration, such as constructors, projections,
+    recursors, equation theorems, and `deriving` instances. -/
+structure EnvironmentDeclarationInfo where
+  name : String
+  kind : String
+  typeText : String
+  levelParams : Array String := #[]
+  typeReferences : Array String := #[]
+  valueReferences : Array String := #[]
+  attributes : Array String := #[]
+  isInstance : Bool := false
+  instancePriority : Option Nat := none
+  instanceScope : Option String := none
+  instanceParameters : Option (Array ParamInfo) := none
+  instanceTargetText : Option String := none
+  instanceClassName : Option String := none
+  isPrimary : Bool := false
+  sourceDeclaration : Option String := none
+  sourceRange : Lean.Lsp.Range
+  deriving Lean.ToJson, Lean.FromJson
+
 /-- Complete information about a declaration -/
 structure DeclarationInfo where
   kind : String  -- "def", "theorem", "axiom", "opaque", "structure", etc.
@@ -119,6 +142,9 @@ structure DeclarationInfo where
   bodyText : Option String  -- "x + y", may contain multiple lines
   bodyRange : Option Lean.Lsp.Range := none  -- Exact source range of bodyText when available
   fields : Option (Array StructureFieldInfo) := none  -- Only structure/class declarations
+  environmentDelta : Option (Array EnvironmentDeclarationInfo) := none
+  generatedDeclarations : Option (Array EnvironmentDeclarationInfo) := none
+  environmentDeltaComplete : Option Bool := none
   fullText : String  -- Complete declaration text
   range : Lean.Lsp.Range  -- Declaration range in document
   hasError : Bool := false  -- Whether this declaration has syntax errors

@@ -15,6 +15,7 @@ A Python interface to the Lean 4 kernel — designed for AI–Lean interactive a
 ## Features
 
 - **Declaration extraction** — `def`, `theorem`, `lemma`, `structure`, `inductive`, `class`, `instance`, `abbrev`, `axiom`, `opaque`, `example` with parameter, type, body range, and structured structure/class field information
+- **Generated declaration metadata** — Per-command environment deltas expose constructors, projections, recursors, equation declarations, and `deriving` output, including Lean instance registration metadata
 - **Syntax tree parsing** — Access Lean's internal syntax tree via `parseDocument` and `debugSyntaxTree`
 - **Proof goal inspection** — Query proof state at any source position (`$/lean/plainGoal`)
 - **Diagnostics** — Real-time compiler errors and warnings (`textDocument/publishDiagnostics`)
@@ -142,6 +143,11 @@ pool = client.create_pool(text=content, size=1)
 result = pool.extract_declarations(text=content)
 for decl in result["decls"]:
     print(f"{decl['kind']} {decl['name']}")
+    if decl.get("environmentDeltaComplete"):
+        for generated in decl.get("generatedDeclarations") or []:
+            print("  generated", generated["kind"], generated["name"])
+# Generated instances also include their parameters, target class, priority,
+# and local/global/scoped registration information.
 # Complete document diagnostics from this same didChange are included too.
 diagnostics = result["diagnostics"]
 
@@ -340,6 +346,22 @@ of the earlier `DeclarationInfo` shape can continue to ignore them.
 `:=`. Semantic field metadata is associated through the command's environment
 delta, so namespace-qualified, `_root_`, and private structures cannot be
 silently confused with an existing same-named declaration.
+
+### EnvironmentDeclarationInfo
+
+`environmentDelta` contains every Lean constant introduced while elaborating
+one source declaration; `generatedDeclarations` is its non-primary subset.
+Entries include the elaborated name, kind, type, universe parameters,
+type/value references, source declaration, and source range. Registered
+instances additionally expose `instanceParameters`, `instanceTargetText`,
+`instanceClassName`, `instancePriority`, and `instanceScope`.
+
+Check `environmentDeltaComplete` before treating these lists as exhaustive. It
+is false when no preceding environment snapshot is available or the source
+declaration has an attributed error; complete document errors still come from
+the top-level `diagnostics` array. The portable `attributes` list reports
+semantic `class`/`instance` registration and is not a universal enumeration of
+extension-specific Lean attributes.
 
 ## Documentation
 
