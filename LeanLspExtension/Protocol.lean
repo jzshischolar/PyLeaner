@@ -112,6 +112,9 @@ structure DeclarationInfo where
   modifiers : Option (Array String) := none  -- normalized source modifiers, e.g. local/noncomputable/attribute
   paramsText : Option String  -- "(x : Nat) (y : Nat)" (backward compat)
   params : Option (Array ParamInfo)  -- Structured parameter information
+  levelParams : Option (Array String) := none  -- Elaborated universe parameters
+  typeReferences : Option (Array String) := none  -- Constants referenced by the elaborated declaration type
+  valueReferences : Option (Array String) := none  -- Constants referenced by the elaborated declaration value/body
   typeText : Option String  -- "Nat", "List α", etc.
   bodyText : Option String  -- "x + y", may contain multiple lines
   bodyRange : Option Lean.Lsp.Range := none  -- Exact source range of bodyText when available

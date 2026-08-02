@@ -8,6 +8,7 @@ import Lean.Server.Snapshots
 import Lean.Parser.Command
 import Lean.Syntax
 import Lean.Data.EditDistance
+import Lean.Util.FoldConsts
 import LeanLspExtension.Protocol
 
 namespace LeanLspExtension
@@ -944,6 +945,64 @@ private def extractStructureFields
       className := semantic?.bind (·.className)
     }
 
+/-- Resolve the environment name introduced by one source declaration. -/
+private def resolveIntroducedDeclarationName?
+    (snap : Lean.Server.Snapshots.Snapshot) (previousEnv? : Option Lean.Environment)
+    (stx : Lean.Syntax) (sourceName? : Option String) : Option Lean.Name := Id.run do
+  let some sourceName := sourceName? | return none
+  let env := snap.env
+  if isStructureLikeDeclaration stx then
+    return resolveIntroducedStructureName? snap previousEnv? sourceName
+  else
+    let currNamespace := snap.cmdState.scopes.head?.map (·.currNamespace)
+      |>.getD Lean.Name.anonymous
+    let userName := if sourceName.startsWith "_root_." then
+      (sourceName.drop 7).toName
+    else
+      currNamespace ++ sourceName.toName
+    let candidates := #[userName, Lean.mkPrivateName env userName]
+    return candidates.find? fun candidate =>
+      env.contains candidate &&
+        !(previousEnv?.any fun previousEnv => previousEnv.contains candidate)
+
+/-- Recover elaborated universe parameters for the declaration introduced by
+    one source command. This is generic declaration metadata: consumers decide
+    how universe parameters participate in their own protocols. -/
+private def extractDeclarationLevelParams
+    (snap : Lean.Server.Snapshots.Snapshot) (previousEnv? : Option Lean.Environment)
+    (stx : Lean.Syntax) (sourceName? : Option String) : Array String := Id.run do
+  let some declarationName :=
+    resolveIntroducedDeclarationName? snap previousEnv? stx sourceName?
+    | return #[]
+  let some info := snap.env.find? declarationName | return #[]
+  return (info.levelParams.map toString).toArray
+
+/-- Return the constants referenced by the elaborated declaration value/body.
+    This is deliberately generic environment metadata. It does not interpret
+    projections, dependency graphs, template sections, or downstream roles. -/
+private def extractDeclarationValueReferences
+    (snap : Lean.Server.Snapshots.Snapshot) (previousEnv? : Option Lean.Environment)
+    (stx : Lean.Syntax) (sourceName? : Option String) : Array String := Id.run do
+  let some declarationName :=
+    resolveIntroducedDeclarationName? snap previousEnv? stx sourceName?
+    | return #[]
+  let some info := snap.env.find? declarationName | return #[]
+  let value? := match info with
+    | .opaqueInfo value => some value.value
+    | _ => info.value?
+  let some value := value? | return #[]
+  return value.getUsedConstants.map toString
+
+/-- Return constants referenced by the elaborated declaration type. -/
+private def extractDeclarationTypeReferences
+    (snap : Lean.Server.Snapshots.Snapshot) (previousEnv? : Option Lean.Environment)
+    (stx : Lean.Syntax) (sourceName? : Option String) : Array String := Id.run do
+  let some declarationName :=
+    resolveIntroducedDeclarationName? snap previousEnv? stx sourceName?
+    | return #[]
+  let some info := snap.env.find? declarationName | return #[]
+  return info.type.getUsedConstants.map toString
+
 /-- Exact source range corresponding to `bodyText`, when the parser exposes a
     dedicated body node. -/
 private partial def extractBodyRange
@@ -1130,6 +1189,11 @@ def extractDeclarations (_params : ExtractDeclarationsParams) : RequestM (Reques
 
         -- Construct declaration info
         let structuredParams := extractStructuredParams stx doc.meta.text
+        let levelParams := extractDeclarationLevelParams snap previousEnv? stx name
+        let typeReferences :=
+          extractDeclarationTypeReferences snap previousEnv? stx name
+        let valueReferences :=
+          extractDeclarationValueReferences snap previousEnv? stx name
         let bodyRange := extractBodyRange kind stx doc.meta.text
         let fields ← if isStructureLikeDeclaration stx then
           let semanticSourceName? := if hasError then none else name
@@ -1142,6 +1206,9 @@ def extractDeclarations (_params : ExtractDeclarationsParams) : RequestM (Reques
           modifiers := some (extractDeclarationModifiers stx),
           paramsText := paramsText,
           params := structuredParams,
+          levelParams := some levelParams,
+          typeReferences := some typeReferences,
+          valueReferences := some valueReferences,
           typeText := typeText,
           bodyText := bodyText,
           bodyRange := bodyRange,

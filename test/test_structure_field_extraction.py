@@ -17,10 +17,11 @@ FULL_RANGE = {
 
 VALID_SOURCE = """import LeanLspExtension
 namespace InfrastructureFixture
+universe u v
 
 abbrev Proposition := Prop
 
-structure Fields (α : Type) where
+structure Fields (α : Type u) where
   (x y : α)
   {hidden : α}
   [inst : BEq α]
@@ -32,7 +33,7 @@ structure Fields (α : Type) where
   sortGoal : Sort 0
   data : List α
 
-class Operations (α : Type) where
+class Operations (α : Type v) where
   op : α → α
   op_law : ∀ x, op x = op x
 
@@ -83,6 +84,9 @@ def use (n : Nat) : Nat :=
 def commentedBody : Nat :=
   -- This comment belongs to the declaration body.
   7
+
+def dependsOnUse : Nat :=
+  use commentedBody
 
 def predecessor : Nat → Nat
   | 0 => 0
@@ -199,11 +203,20 @@ def test_class_fields_and_non_structure_compatibility(client):
     cls = next(d for d in decls if d["name"] == "Operations")
     with_ctor = next(d for d in decls if d["name"] == "WithCtor")
     definition = next(d for d in decls if d["name"] == "use")
+    dependent_definition = next(d for d in decls if d["name"] == "dependsOnUse")
     equation_definition = next(d for d in decls if d["name"] == "predecessor")
     axiom_declaration = next(d for d in decls if d["name"] == "hiddenAssumption")
     opaque_declaration = next(d for d in decls if d["name"] == "hiddenValue")
 
     assert cls["kind"] == "class"
+    assert cls["levelParams"] == ["v"]
+    assert next(d for d in decls if d["name"] == "Fields")["levelParams"] == ["u"]
+    assert definition["levelParams"] == []
+    assert {
+        "InfrastructureFixture.use",
+        "InfrastructureFixture.commentedBody",
+    }.issubset(set(dependent_definition["valueReferences"]))
+    assert "Nat" in dependent_definition["typeReferences"]
     assert [f["name"] for f in cls["fields"]] == ["op", "op_law"]
     assert cls["fields"][1]["isProp"] is True
     assert cls["fields"][1]["projectionName"] == "InfrastructureFixture.Operations.op_law"
@@ -272,7 +285,7 @@ def test_ranges_are_recomputed_after_document_change(client):
     decls = _declarations(client, shifted_source)
     structure = next(d for d in decls if d["name"] == "Fields")
     expected_structure_line = shifted_source.splitlines().index(
-        "structure Fields (α : Type) where"
+        "structure Fields (α : Type u) where"
     )
 
     assert structure["range"]["start"]["line"] == expected_structure_line
