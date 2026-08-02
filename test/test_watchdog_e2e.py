@@ -39,9 +39,9 @@ def main() -> int:
         c.connect(timeout=300)
         c.create_pool(text=BASE, size=1)
         old_pid = c.process.pid
-        wd = c.watchdog._thread
+        wd = c.watchdog._process
         print(f"    server pid={old_pid}; "
-              f"watchdog thread alive={wd.is_alive() if wd else False}")
+              f"watchdog process alive={wd.is_alive() if wd else False}")
 
         print("\n[2] baseline get_diagnostics ...")
         diags = c.worker_pool.get_diagnostics(text=BASE, content_range={},

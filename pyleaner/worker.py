@@ -120,6 +120,8 @@ class Worker:
                 break
             self.current_task = task
             self.task_started_at = time.monotonic()
+            watchdog_generation = self.client.watchdog.task_started(
+                self.worker_id, self.task_started_at)
             task_type = task.get("task_type")
             result_q = task.get("result_q")
             kwargs = task.get("kwargs", {})
@@ -136,6 +138,8 @@ class Worker:
                 if result_q is not None:
                     result_q.put({"success": False, "error": e})
             finally:
+                self.client.watchdog.task_finished(
+                    self.worker_id, watchdog_generation)
                 self.current_task = None
                 self.task_started_at = None
 
@@ -152,6 +156,7 @@ class Worker:
                 "success": False,
                 "error": ServiceUnavailable(),
                 "toxic": bool(cur.get("_culprit", False)),
+                "toxic_reason": cur.get("_culprit_reason"),
             })
         while True:
             try:
