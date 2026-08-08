@@ -9,6 +9,7 @@ import Lean.Parser.Command
 import Lean.Syntax
 import Lean.Data.EditDistance
 import Lean.Util.FoldConsts
+import LeanLspExtension.Compat
 import LeanLspExtension.Protocol
 
 namespace LeanLspExtension
@@ -18,13 +19,13 @@ open Lean.Server
 open Lean.Server.RequestM
 
 /-- Get the source range used to attribute diagnostics to a command. -/
-def getCommandRange? (stx : Lean.Syntax) : Option String.Range :=
+def getCommandRange? (stx : Lean.Syntax) : Option Compat.SourceRange :=
   match stx.getRangeWithTrailing? (canonicalOnly := true) with
   | some range => some range
   | none => stx.getRange?
 
 /-- Convert an official LSP diagnostic range back to the document UTF-8 range. -/
-def diagnosticUtf8Range (text : Lean.FileMap) (diag : Lean.Widget.InteractiveDiagnostic) : String.Range := {
+def diagnosticUtf8Range (text : Lean.FileMap) (diag : Lean.Widget.InteractiveDiagnostic) : Compat.SourceRange := {
   start := text.lspPosToUtf8Pos diag.range.start,
   stop := text.lspPosToUtf8Pos diag.range.«end»
 }
@@ -40,7 +41,7 @@ partial def collectCommandErrorMessages
     if diag.severity? == some Lean.Lsp.DiagnosticSeverity.error then
       let includeDiag := match commandRange? with
       | some commandRange =>
-        commandRange.overlaps (diagnosticUtf8Range text diag)
+        Compat.rangesOverlap commandRange (diagnosticUtf8Range text diag)
           (includeFirstStop := true) (includeSecondStop := true)
       | none => true
       if includeDiag then
@@ -49,8 +50,7 @@ partial def collectCommandErrorMessages
 
 /-- Read diagnostics reported by the official Lean LSP reporter. -/
 def collectDocumentDiagnostics (doc : Lean.Server.FileWorker.EditableDocument) : RequestM (Array Lean.Widget.InteractiveDiagnostic) := do
-  let _ ← doc.reporter.wait
-  doc.diagnosticsRef.get
+  Compat.collectDocumentDiagnostics doc
 
 /-- Helper: Recursively find the first atom -/
 partial def findFirstAtom (stx : Lean.Syntax) : String :=
@@ -158,7 +158,7 @@ partial def extractDeclarationModifiers (stx : Lean.Syntax) : Array String :=
     if node.getKind == ``Lean.Parser.Term.attributes then
       acc.push "attribute"
     else if node.isAtom then
-      let atom := node.getAtomVal.trim
+      let atom := Compat.trim node.getAtomVal
       if accepted.contains atom then acc.push atom else acc
     else if node.isIdent then
       acc
@@ -221,7 +221,7 @@ def binderKindToString (stx : Lean.Syntax) : String :=
     toString on a Syntax.ident returns "`x", we want just "x".
 -/
 def stripIdentPrefix (name : String) : String :=
-  if name.startsWith "`" then name.drop 1 else name
+  if name.startsWith "`" then Compat.drop name 1 else name
 
 /-- Helper: Extract type text from the binderType child node of a binder.
     Actual binder structure (from debug dump):
@@ -247,7 +247,7 @@ def extractBinderTypeText (binderArgs : Array Lean.Syntax) (text : Lean.FileMap)
           let lastRange := typeExpr[typeExpr.size - 1]!.getRange?
           match firstRange, lastRange with
           | some r1, some r2 =>
-            let rawText := String.Pos.Raw.extract text.source r1.start r2.stop |>.trim
+            let rawText := Compat.trim (String.Pos.Raw.extract text.source r1.start r2.stop)
             if rawText.isEmpty then none else some rawText
           | _, _ => none)
       (fun _ => none)
@@ -316,7 +316,7 @@ partial def extractInstBinderInfo (binderNode : Lean.Syntax) (text : Lean.FileMa
         -- Type text from the class expression node
         let typeText : Option String := match classExpr.getRange? with
           | some range =>
-            let rawText := String.Pos.Raw.extract text.source range.start range.stop |>.trim
+            let rawText := Compat.trim (String.Pos.Raw.extract text.source range.start range.stop)
             if rawText.isEmpty then none else some rawText
           | none => none
 
@@ -415,7 +415,7 @@ partial def extractTypeText (stx : Lean.Syntax) (text : Lean.FileMap) : Option S
                   match returnTypePart.getRange? with
                   | some range =>
                     let rawText := String.Pos.Raw.extract text.source range.start range.stop
-                    let stripped := rawText.trimLeft |>.drop 1 |>.trimLeft
+                    let stripped := Compat.trimStart (Compat.drop (Compat.trimStart rawText) 1)
                     if stripped.isEmpty then none else some stripped
                   | none => none
                 else none)
@@ -438,9 +438,9 @@ partial def findDeclValNode? (stx : Lean.Syntax) : Option Lean.Syntax :=
 
 /-- Helper: Strip the leading `:=` marker from a `declValSimple` node text. -/
 def stripDeclValSimplePrefix (bodyText : String) : String :=
-  let trimmed := bodyText.trimLeft
+  let trimmed := Compat.trimStart bodyText
   if trimmed.startsWith ":=" then
-    trimmed.drop 2 |>.trimLeft
+    Compat.trimStart (Compat.drop trimmed 2)
   else
     trimmed
 
@@ -459,7 +459,7 @@ partial def extractBodyText (stx : Lean.Syntax) (text : Lean.FileMap) : Option S
         let bodyText := if bodyNode.getKind == ``Lean.Parser.Command.declValSimple then
           stripDeclValSimplePrefix rawText
         else
-          rawText.trim
+          Compat.trim rawText
         if bodyText.isEmpty then none else some bodyText
 
 /-- Helper: Extract parameters from optDeclSig (for structure/inductive/def) -/
@@ -491,7 +491,7 @@ partial def extractParamsFromOptDeclSig (stx : Lean.Syntax) (text : Lean.FileMap
             match paramsPart.getRange? with
             | some range =>
               let rawText := String.Pos.Raw.extract text.source range.start range.stop
-              let trimmed := rawText.trim
+              let trimmed := Compat.trim rawText
               if trimmed.isEmpty then none else some trimmed
             | none => none
           else none)
@@ -526,10 +526,10 @@ partial def extractTypeFromOptDeclSig (stx : Lean.Syntax) (text : Lean.FileMap) 
             match typePart.getRange? with
             | some range =>
               let rawText := String.Pos.Raw.extract text.source range.start range.stop
-              let trimmed := rawText.trim
+              let trimmed := Compat.trim rawText
               if trimmed.isEmpty || trimmed == ":" then none
               else
-                let withoutColon := if trimmed.startsWith ":" then trimmed.drop 1 |>.trim else trimmed
+                let withoutColon := if trimmed.startsWith ":" then Compat.trim (Compat.drop trimmed 1) else trimmed
                 if withoutColon.isEmpty then none else some withoutColon
             | none => none
           else none)
@@ -564,7 +564,7 @@ partial def extractParamsFromDeclSig (stx : Lean.Syntax) (text : Lean.FileMap) :
             match paramsPart.getRange? with
             | some range =>
               let rawText := String.Pos.Raw.extract text.source range.start range.stop
-              let trimmed := rawText.trim
+              let trimmed := Compat.trim rawText
               if trimmed.isEmpty then none else some trimmed
             | none => none
           else none)
@@ -599,10 +599,10 @@ partial def extractTypeFromDeclSig (stx : Lean.Syntax) (text : Lean.FileMap) : O
             match typePart.getRange? with
             | some range =>
               let rawText := String.Pos.Raw.extract text.source range.start range.stop
-              let trimmed := rawText.trim
+              let trimmed := Compat.trim rawText
               if trimmed.isEmpty || trimmed == ":" then none
               else
-                let withoutColon := if trimmed.startsWith ":" then trimmed.drop 1 |>.trim else trimmed
+                let withoutColon := if trimmed.startsWith ":" then Compat.trim (Compat.drop trimmed 1) else trimmed
                 if withoutColon.isEmpty then none else some withoutColon
             | none => none
           else none)
@@ -632,7 +632,7 @@ partial def extractBodyFromWhereStructInst (stx : Lean.Syntax) (text : Lean.File
       match whereStructInst.getRange? with
       | some range =>
         let rawText := String.Pos.Raw.extract text.source range.start range.stop
-        let trimmed := rawText.trim
+        let trimmed := Compat.trim rawText
         if trimmed.isEmpty then none else some trimmed
       | none => none
 
@@ -654,11 +654,11 @@ partial def extractBodyFromStructFields (stx : Lean.Syntax) (text : Lean.FileMap
             match fieldsPart.getRange? with
             | some range =>
               let rawText := String.Pos.Raw.extract text.source range.start range.stop
-              let trimmed := rawText.trim
+              let trimmed := Compat.trim rawText
               -- Strip "where" keyword if present at the start
-              let hasWhere := trimmed.take 5 == "where"
+              let hasWhere := Compat.take trimmed 5 == "where"
               let withoutWhere := if hasWhere then
-                let after := trimmed.drop 5 |>.trimLeft
+                let after := Compat.trimStart (Compat.drop trimmed 5)
                 if after.isEmpty then "" else after
               else
                 trimmed
@@ -676,7 +676,7 @@ partial def extractBodyFromStructFields (stx : Lean.Syntax) (text : Lean.FileMap
                     match first.getRange?, last.getRange? with
                     | some r1, some r2 =>
                       let rawText := String.Pos.Raw.extract text.source r1.start r2.stop
-                      let trimmed := rawText.trim
+                      let trimmed := Compat.trim rawText
                       if trimmed.isEmpty then none else some trimmed
                     | _, _ => none)
                 (fun _ => none)
@@ -710,7 +710,7 @@ private def extractStructureBodyRange (declStx : Lean.Syntax) (text : Lean.FileM
         match n.getArgs[4]!.getRange? with
         | none => none
         | some range =>
-          let raw : Substring := ⟨text.source, range.start, range.stop⟩
+          let raw : Substring.Raw := ⟨text.source, range.start, range.stop⟩
           let trimmed := raw.trim
           let body := if trimmed.toString.startsWith "where" then
             (trimmed.drop 5).trimLeft
@@ -729,7 +729,7 @@ private def extractDeclValSimpleBodyRange
   match bodyNode.getRange? with
   | none => none
   | some range =>
-    let raw : Substring := ⟨text.source, range.start, range.stop⟩
+    let raw : Substring.Raw := ⟨text.source, range.start, range.stop⟩
     let trimmed := raw.trimLeft
     let body := if trimmed.toString.startsWith ":=" then
       (trimmed.drop 2).trimLeft
@@ -749,8 +749,8 @@ private def extractTypeFromSignatureNode (sig : Lean.Syntax) (text : Lean.FileMa
         match args[1]!.getRange? with
         | none => none
         | some range =>
-          let rawText := String.Pos.Raw.extract text.source range.start range.stop |>.trim
-          let withoutColon := if rawText.startsWith ":" then rawText.drop 1 |>.trim else rawText
+          let rawText := Compat.trim (String.Pos.Raw.extract text.source range.start range.stop)
+          let withoutColon := if rawText.startsWith ":" then Compat.trim (Compat.drop rawText 1) else rawText
           if withoutColon.isEmpty then none else some withoutColon)
     (fun _ => none)
 
@@ -1195,7 +1195,7 @@ partial def extractDeclarationNameSimple (stx : Lean.Syntax) : RequestM (Option 
     | some name =>
       -- Strip the Lean identifier backtick prefix
       if name.startsWith "`" then
-        pure (some (name.drop 1))
+        pure (some (Compat.drop name 1))
       else
         pure (some name)
     | none => pure none
@@ -1264,7 +1264,7 @@ def extractDeclarations (_params : ExtractDeclarationsParams) : RequestM (Reques
       -- First check if it is a declaration
       if let some kind ← getDeclarationKindFromSyntax stx then
         -- Get the syntax range
-        let synRange := stx.getRange?.getD (⟨0,0⟩: String.Range)
+        let synRange := stx.getRange?.getD (⟨0,0⟩ : Compat.SourceRange)
         let lspRange := doc.meta.text.utf8RangeToLspRange synRange
 
         -- Extract declaration text
@@ -1380,7 +1380,7 @@ private def declarationBaseName (name : Lean.Name) : String :=
 private def declarationNameVariants (query : String) : Array Lean.Name :=
   let segmentVariants := fun (segment : String) =>
     #[segment, segment.capitalize, segment.decapitalize]
-  let variants := query.trim.splitOn "." |>.foldl (fun prefixes segment =>
+  let variants := (Compat.trim query).splitOn "." |>.foldl (fun prefixes segment =>
     prefixes.foldl (fun result stem =>
       segmentVariants segment |>.foldl (fun inner part =>
         let value := if stem.isEmpty then part else stem ++ "." ++ part
@@ -1394,7 +1394,7 @@ private def declarationNameVariants (query : String) : Array Lean.Name :=
     first.  Comparing both representations makes this useful for casing and
     namespace mistakes without embedding a library-specific name table. -/
 private def declarationSearchScore (query : String) (name : Lean.Name) : Option Nat :=
-  let normalizedQuery := query.trim.toLower
+  let normalizedQuery := (Compat.trim query).toLower
   if normalizedQuery.isEmpty then none
   else
     let full := name.toString (escape := false) |>.toLower
@@ -1477,7 +1477,7 @@ def parseDocument (_params : ParseParams) : RequestM (RequestTask ParseResult) :
     for snap in snaps do
       -- Get the command syntax from the snapshot
       let stx := snap.stx
-      let synRange := stx.getRange?.getD (⟨0,0⟩: String.Range)
+      let synRange := stx.getRange?.getD (⟨0,0⟩ : Compat.SourceRange)
       let lspRange := doc.meta.text.utf8RangeToLspRange synRange
 
       -- Extract the text for this command using String.Pos.Raw.extract
@@ -1583,7 +1583,7 @@ def debugDocument (_params : DebugDocumentParams) : RequestM (RequestTask DebugD
   let prefixLen := min 100 text.length
   return RequestTask.pure {
     textLength := text.length,
-    textPrefix := text.take prefixLen
+    textPrefix := Compat.take text prefixLen
   }
 
 
@@ -1911,7 +1911,7 @@ def getSyntaxNodeInfo (stx : Lean.Syntax) (text : Lean.FileMap) : String :=
   | some range =>
     let snippet := String.Pos.Raw.extract text.source range.start range.stop
     let maxLength := min 30 snippet.length
-    let preview := snippet.take maxLength
+    let preview := Compat.take snippet maxLength
     if snippet.length > 30 then s!"{preview}..." else s!"{preview}"
   | none => "(no range)"
 
