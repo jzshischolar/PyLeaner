@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "declarationOrder": [
+    ["System", "class"],
+    ["Shade", "inductive"],
+    ["selected", "instance"],
+    ["objective", "def"]
+  ],
+  "system": {
+    "levelParams": ["u"],
+    "params": [
+      {"name": "α", "type": "Type u", "binderKind": "explicit"}
+    ],
+    "fields": [
+      {"name": "x", "typeText": "α", "binderKind": "explicit", "isClass": false, "isProp": false, "isPropType": false},
+      {"name": "y", "typeText": "α", "binderKind": "explicit", "isClass": false, "isProp": false, "isPropType": false},
+      {"name": "eqv", "typeText": "BEq α", "binderKind": "instance", "isClass": true, "isProp": false, "isPropType": false},
+      {"name": "proof", "typeText": "x = y", "binderKind": "explicit", "isClass": false, "isProp": true, "isPropType": false},
+      {"name": "goal", "typeText": "Prop", "binderKind": "explicit", "isClass": false, "isProp": false, "isPropType": true}
+    ]
+  },
+  "derived": {
+    "environmentDeltaComplete": true,
+    "generatedInstanceClasses": ["Decidable", "Repr", "SizeOf"]
+  },
+  "selected": {
+    "modifiers": ["local"],
+    "params": [
+      {"name": "sys", "type": "System Nat", "binderKind": "instance"}
+    ],
+    "typeText": "BEq Nat",
+    "bodyText": "sys.eqv",
+    "instanceClassName": "BEq",
+    "instanceScope": "local",
+    "instancePriority": 1000
+  },
+  "objective": {
+    "typeText": "Prop",
+    "bodyText": "sys.goal",
+    "typeReferencesContain": ["MigrationContract.System"],
+    "valueReferencesContain": ["MigrationContract.System.goal"]
+  }
+}
