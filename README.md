@@ -379,7 +379,7 @@ See the `examples/` directory for Lean files that demonstrate supported declarat
 
 ## Requirements
 
-- **Lean 4**: `v4.25.0-rc2` (specified in `lean-toolchain`)
+- **Lean 4**: `v4.32.2` (specified in `lean-toolchain`)
 - **Python**: ≥ 3.12
 - **Mathlib**: **Not required.** PyLeaner core only depends on the Lean standard library. Import Mathlib only if your project already uses it
 

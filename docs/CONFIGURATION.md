@@ -56,7 +56,7 @@ liveness and deadline monitoring.
 The required Lean version is specified in the `lean-toolchain` file at the project root. For example:
 
 ```
-leanprover/lean4:v4.25.0-rc2
+leanprover/lean4:v4.32.2
 ```
 
 PyLeaner follows the same version as your project's `lean-toolchain` file.
