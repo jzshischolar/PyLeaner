@@ -188,7 +188,10 @@ class RpcSession:
         """Create a new RPC session and return the session ID."""
         debug_log(f"Creating RPC session for: {self.uri}")
         result = self.client.request(
-            "$/lean/rpc/connect", {"uri": self.uri}, self.worker_id, timeout=timeout
+            "$/lean/rpc/connect",
+            {"uri": self.uri},
+            self.client._next_id(),
+            timeout=timeout,
         )
         session_id = result.get("sessionId")
         if session_id is not None:

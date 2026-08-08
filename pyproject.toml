@@ -36,3 +36,9 @@ Documentation = "https://github.com/jiangzeshi/PyLeaner/blob/main/README.md"
 
 [tool.setuptools.packages.find]
 include = ["pyleaner*"]
+
+[tool.pytest.ini_options]
+# The console-script entry point otherwise puts the virtual environment's
+# site-packages before this flat-layout checkout.  Always qualify the source
+# tree being tested, even when an older PyLeaner wheel is already installed.
+pythonpath = ["."]

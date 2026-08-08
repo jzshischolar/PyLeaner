@@ -7,6 +7,7 @@ import time
 
 import pytest
 
+import pyleaner.watchdog as watchdog_module
 from pyleaner.client import _submit_resilient
 from pyleaner.errors import ServiceUnavailable, ToxicTaskError
 from pyleaner.rpc_session import RpcSession, RpcTimeoutError
@@ -57,6 +58,25 @@ def test_rpc_timeout_has_a_distinct_exception_type():
 
     assert exc_info.value.timeout == 0.01
     assert client._pending_requests == {}
+
+
+def test_rpc_session_connect_uses_global_request_id_allocator():
+    client = FakeClient()
+    allocated = iter((41, 42))
+    client._next_id = lambda: next(allocated)
+    request_ids = []
+
+    def request(_method, _params, msg_id, timeout):
+        request_ids.append((msg_id, timeout))
+        return {"sessionId": str(1000 + msg_id)}
+
+    client.request = request
+    first = RpcSession(worker_id=1, uri="file:///worker_1.lean", client=client)
+    second = RpcSession(worker_id=1, uri="file:///worker_1.lean", client=client)
+
+    assert first.connect(timeout=3.0) == 1041
+    assert second.connect(timeout=4.0) == 1042
+    assert request_ids == [(41, 3.0), (42, 4.0)]
 
 
 def test_watchdog_teardown_wakes_pending_rpc_callers():
@@ -129,7 +149,14 @@ def test_watchdog_observer_runs_in_a_separate_process():
         watchdog.stop()
 
 
-def _start_fake_monitor(command_queue, event_queue, *, replacement_grace=0.02):
+def _start_fake_monitor(
+    command_queue,
+    event_queue,
+    *,
+    replacement_grace=0.02,
+    soft_memory_limit=1024,
+    hard_memory_limit=2048,
+):
     monitor = threading.Thread(
         target=_watchdog_monitor_main,
         args=(
@@ -139,8 +166,8 @@ def _start_fake_monitor(command_queue, event_queue, *, replacement_grace=0.02):
             60.0,
             60.0,
             0.005,
-            1024,
-            2048,
+            soft_memory_limit,
+            hard_memory_limit,
             replacement_grace,
         ),
         daemon=True,
@@ -212,6 +239,83 @@ def test_logical_worker_pid_replacement_rebinds_without_restart(monkeypatch):
         command_queue.put({"type": "stop"})
         monitor.join(timeout=1)
     assert not monitor.is_alive()
+
+
+def test_logical_worker_pid_replacement_is_observed_without_cgroup(monkeypatch):
+    command_queue = queue.Queue()
+    event_queue = queue.Queue()
+
+    monkeypatch.setattr(
+        watchdog_module, "_set_parent_death_signal", lambda *_args: None)
+    monkeypatch.setattr(
+        watchdog_module, "_process_alive", lambda pid: pid in {9000, 1002})
+    monkeypatch.setattr(
+        watchdog_module, "_lean_worker_pids", lambda _root_pid: {1: 1002})
+    monkeypatch.setattr(
+        watchdog_module,
+        "_systemd_scope_for_pid",
+        lambda *_args: pytest.fail("cgroup setup must remain disabled"),
+    )
+
+    command_queue.put({"type": "root", "pid": 9000, "generation": 1})
+    command_queue.put({
+        "type": "guards",
+        "generation": 1,
+        "guards": {
+            1: {
+                "pid": 1001,
+                "unit": "",
+                "cgroup_path": "",
+                "oom_kill": 0,
+            },
+        },
+    })
+    monitor = _start_fake_monitor(
+        command_queue,
+        event_queue,
+        soft_memory_limit=None,
+        hard_memory_limit=None,
+    )
+    try:
+        event = event_queue.get(timeout=5)
+        assert event["type"] == "guard_replaced"
+        assert event["worker_id"] == 1
+        assert event["old_pid"] == 1001
+        assert event["guard"] == {
+            "pid": 1002,
+            "unit": "",
+            "cgroup_path": "",
+            "oom_kill": 0,
+        }
+    finally:
+        command_queue.put({"type": "stop"})
+        monitor.join(timeout=1)
+    assert not monitor.is_alive()
+
+
+def test_attach_worker_guards_tracks_pids_without_memory_limits(monkeypatch):
+    client = FakeClient()
+    client.process = FakeProcess()
+    watchdog = Watchdog(client)
+    watchdog._size = 2
+    sent = []
+    monkeypatch.setattr(
+        watchdog_module,
+        "_lean_worker_pids",
+        lambda _root_pid: {1: 1001, 2: 1002},
+    )
+    monkeypatch.setattr(watchdog, "_send", lambda message: sent.append(message))
+    watchdog.attach_worker_guards(timeout=1.0)
+
+    assert watchdog._worker_scopes == {
+        1: {"pid": 1001, "unit": "", "cgroup_path": "", "oom_kill": 0},
+        2: {"pid": 1002, "unit": "", "cgroup_path": "", "oom_kill": 0},
+    }
+    assert sent == [{
+        "type": "guards",
+        "generation": 0,
+        "guards": watchdog._worker_scopes,
+    }]
 
 
 def test_dead_worker_without_replacement_still_triggers_recovery(monkeypatch):

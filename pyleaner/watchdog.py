@@ -1,11 +1,12 @@
 """Process-backed liveness and memory watchdog for the Lean LSP server.
 
 Observation runs in a dedicated process, so a memory-hungry Lean elaboration
-cannot starve the watchdog through the Python GIL.  Every Lean ``--worker`` is
-also adopted by a transient systemd user scope with ``MemoryMax``.  The
-process-level soft RSS limit normally triggers an orderly online restart; the
-cgroup hard limit remains effective even when the monitor itself is not
-scheduled.
+cannot starve the watchdog through the Python GIL. Every discoverable Lean
+``--worker`` is monitored for unexpected exit. When memory limits are enabled,
+workers are additionally adopted by transient systemd user scopes with
+``MemoryMax``. The process-level soft RSS limit normally triggers an orderly
+online restart; the cgroup hard limit remains effective even when the monitor
+itself is not scheduled.
 
 The small event-receiver thread in the owning process performs the actual
 ``LspClient`` mutation.  Only the worker(s) identified by the monitor are marked
@@ -356,7 +357,7 @@ def _watchdog_monitor_main(command_queue, event_queue, parent_pid: int,
             pid = int(guard["pid"])
             cgroup_path = str(guard["cgroup_path"])
             baseline_oom = int(guard.get("oom_kill", 0))
-            current_oom = _read_oom_kill(cgroup_path)
+            current_oom = _read_oom_kill(cgroup_path) if cgroup_path else None
             if current_oom is not None and current_oom > baseline_oom:
                 _monitor_event(
                     event_queue, generation, "memory",
@@ -384,8 +385,8 @@ def _watchdog_monitor_main(command_queue, event_queue, parent_pid: int,
                 missing_since.pop(worker_id, None)
                 continue
 
-            scope_result = _systemd_scope_result(
-                str(guard.get("unit", "")))
+            old_unit = str(guard.get("unit", ""))
+            scope_result = _systemd_scope_result(old_unit) if old_unit else ""
             if scope_result == "oom-kill":
                 _monitor_event(
                     event_queue, generation, "memory",
@@ -407,21 +408,28 @@ def _watchdog_monitor_main(command_queue, event_queue, parent_pid: int,
                     and _process_alive(replacement_pid)):
                 try:
                     if hard_memory_limit is None:
-                        raise RuntimeError(
-                            "hard memory limit missing during worker rebinding")
-                    unit, replacement_cgroup = _systemd_scope_for_pid(
-                        replacement_pid, worker_id, hard_memory_limit)
-                    replacement_guard = {
-                        "pid": replacement_pid,
-                        "unit": unit,
-                        "cgroup_path": replacement_cgroup,
-                        "oom_kill":
-                            _read_oom_kill(replacement_cgroup) or 0,
-                    }
+                        replacement_guard = {
+                            "pid": replacement_pid,
+                            "unit": "",
+                            "cgroup_path": "",
+                            "oom_kill": 0,
+                        }
+                    else:
+                        unit, replacement_cgroup = _systemd_scope_for_pid(
+                            replacement_pid, worker_id, hard_memory_limit)
+                        replacement_guard = {
+                            "pid": replacement_pid,
+                            "unit": unit,
+                            "cgroup_path": replacement_cgroup,
+                            "oom_kill":
+                                _read_oom_kill(replacement_cgroup) or 0,
+                        }
                     # The replacement can itself be superseded while systemd
                     # adopts it.  Never publish a guard for an already-dead PID.
                     if not _process_alive(replacement_pid):
-                        _stop_systemd_scope(unit)
+                        replacement_unit = str(replacement_guard.get("unit", ""))
+                        if replacement_unit:
+                            _stop_systemd_scope(replacement_unit)
                         missing_since.setdefault(worker_id, now)
                         continue
                 except Exception:
@@ -434,7 +442,9 @@ def _watchdog_monitor_main(command_queue, event_queue, parent_pid: int,
                 old_guard = guard
                 guards[worker_id] = replacement_guard
                 missing_since.pop(worker_id, None)
-                _stop_systemd_scope(str(old_guard.get("unit", "")))
+                old_unit = str(old_guard.get("unit", ""))
+                if old_unit:
+                    _stop_systemd_scope(old_unit)
                 event_queue.put({
                     "type": "guard_replaced",
                     "generation": generation,
@@ -849,12 +859,10 @@ class Watchdog:
         return self.worker_memory_max_bytes is not None
 
     def attach_worker_guards(self, timeout: float = 15.0) -> None:
-        """Put every initialized Lean worker in its own hard-limited scope."""
-        if not self.memory_guards_enabled:
-            return
+        """Observe every worker and optionally put it in a hard-limited scope."""
         proc = self.client.process
         if proc is None or proc.poll() is not None:
-            raise RuntimeError("cannot guard workers of a dead Lean server")
+            raise RuntimeError("cannot observe workers of a dead Lean server")
 
         deadline = time.monotonic() + timeout
         worker_pids: dict[int, int] = {}
@@ -867,24 +875,35 @@ class Watchdog:
         missing = sorted(
             set(range(1, self._size + 1)) - set(worker_pids))
         if missing:
-            raise RuntimeError(
-                f"cannot locate Lean OS worker(s) for cgroup guard: {missing}")
+            if self.memory_guards_enabled:
+                raise RuntimeError(
+                    f"cannot locate Lean OS worker(s) for cgroup guard: {missing}")
+            print(
+                "[WARNING] cannot locate Lean OS worker(s) for liveness "
+                f"observation: {missing}",
+                flush=True,
+            )
+            return
 
         self._stop_worker_scopes()
         created: dict[int, dict[str, Any]] = {}
         try:
             for worker_id in range(1, self._size + 1):
                 pid = worker_pids[worker_id]
-                unit, cgroup_path = _systemd_scope_for_pid(
-                    pid,
-                    worker_id,
-                    int(self.worker_memory_max_bytes),
-                )
+                if self.memory_guards_enabled:
+                    unit, cgroup_path = _systemd_scope_for_pid(
+                        pid,
+                        worker_id,
+                        int(self.worker_memory_max_bytes),
+                    )
+                else:
+                    unit, cgroup_path = "", ""
                 created[worker_id] = {
                     "pid": pid,
                     "unit": unit,
                     "cgroup_path": cgroup_path,
-                    "oom_kill": _read_oom_kill(cgroup_path) or 0,
+                    "oom_kill":
+                        (_read_oom_kill(cgroup_path) or 0) if cgroup_path else 0,
                 }
         except Exception:
             for value in created.values():
@@ -902,7 +921,9 @@ class Watchdog:
         with self._scope_lock:
             scopes, self._worker_scopes = self._worker_scopes, {}
         for value in scopes.values():
-            _stop_systemd_scope(str(value["unit"]))
+            unit = str(value["unit"])
+            if unit:
+                _stop_systemd_scope(unit)
 
     # ── teardown + restart ──────────────────────────────────
 
