@@ -976,6 +976,17 @@ class Watchdog:
         """
         if not self._restart_lock.acquire(blocking=False):
             return
+        emit_event = getattr(self.client, "emit_execution_event", None)
+        if callable(emit_event):
+            emit_event(
+                "recovery_started",
+                outcome="infrastructure_error",
+                details={
+                    "trigger": trigger,
+                    "reason": reason,
+                    "culprit_worker_ids": sorted(culprit_worker_ids or ()),
+                },
+            )
         self.server_ready.clear()
         self._pause_monitor()
         try:
@@ -1023,5 +1034,11 @@ class Watchdog:
             if self._armed:
                 self.client.create_pool(text=self._base_text, size=self._size)
             self.server_ready.set()
+            if callable(emit_event):
+                emit_event(
+                    "recovery_completed",
+                    outcome="success",
+                    details={"trigger": trigger},
+                )
         finally:
             self._restart_lock.release()

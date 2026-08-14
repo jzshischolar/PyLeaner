@@ -244,6 +244,41 @@ Key design points:
 - **Orphan prevention**: six exit paths all converge on `_kill_process_tree` or `/proc` orphan scanning, plus a cron fallback every 4 hours.
 - **Worker gating**: uninitialized workers are skipped by the router; `create_pool` raises if all workers fail.
 
+## Optional Execution Events
+
+Applications that need auditability can pass a thread-safe `event_sink` to
+`LspClient`. The callback receives immutable `LeanExecutionEvent` values for
+task submission, worker assignment, execution, failure, retry, and watchdog
+recovery. This interface is transport-level: it contains no proof-search or
+training semantics, and leaving it unset preserves the ordinary API.
+
+```python
+from pyleaner import LspClient
+
+events = []
+client = LspClient(
+    server_cmd=["lake", "serve"],
+    cwd="/path/to/project",
+    event_sink=events.append,
+)
+
+result = client.submit_resilient(
+    "get_diagnostics",
+    {"text": "example : True := by trivial", "content_range": {}},
+    request_id="caller-owned-correlation-id",
+    context={"operation_id": "check-17"},
+)
+```
+
+Events expose stable `request_id`/`task_id` correlation, document and worker
+identity, exact-source/result SHA-256 fingerprints, diagnostic counts, and
+infrastructure outcomes. `environment_fingerprint` combines the server command,
+`lean-toolchain`, Lake manifest/config files, and byte hashes of the task's local
+Lean import closure (including local LSP extension modules). Source text itself
+is not copied into an event. A sink
+can be invoked concurrently and should enqueue quickly; sink exceptions are
+isolated and never change task or recovery behavior.
+
 ## API Reference
 
 ### LspClient
@@ -254,7 +289,7 @@ Main client for communicating with the Lean 4 LSP server.
 |--------|-------------|
 | `connect()` | Start server + initialize handshake (replaces start/initialize/initialized) |
 | `create_pool(text, uri?, size?)` | Create worker pool + load file content |
-| `submit_resilient(task_type, kwargs)` | Submit a task with transparent crash/wedge recovery |
+| `submit_resilient(task_type, kwargs, request_id?, context?)` | Submit a correlated task with transparent crash/wedge recovery |
 | `start()` | Start the LSP server subprocess (isolated session) |
 | `initialize(root_uri)` | Send LSP initialize request |
 | `initialized()` | Send initialized notification |

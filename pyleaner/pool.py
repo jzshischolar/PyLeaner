@@ -10,9 +10,15 @@ from typing import Any, TYPE_CHECKING
 from . import debug_log, Task
 from .rpc_session import KeepAliveManager
 from .worker import Worker
+from .observability import new_correlation_id, source_fingerprint_from_kwargs
 
 if TYPE_CHECKING:
     from .client import LspClient
+
+
+def _environment_fingerprint(client: LspClient, kwargs: dict) -> str | None:
+    resolver = getattr(client, "task_environment_fingerprint", None)
+    return resolver(kwargs) if callable(resolver) else None
 
 
 class WorkerPool:
@@ -91,12 +97,51 @@ class WorkerPool:
                         "success": False,
                         "error": RuntimeError("No healthy workers available"),
                     })
+                self.client.emit_execution_event(
+                    "task_rejected",
+                    request_id=task.get("request_id"),
+                    task_id=task.get("task_id"),
+                    task_type=task.get("task_type"),
+                    source_fingerprint=source_fingerprint_from_kwargs(
+                        task.get("kwargs", {})),
+                    environment_fingerprint=_environment_fingerprint(
+                        self.client, task.get("kwargs", {})),
+                    outcome="infrastructure_error",
+                    details={"reason": "no_healthy_workers"},
+                )
                 continue
             worker = min(ready, key=lambda w: w.task_queue.qsize())
+            self.client.emit_execution_event(
+                "task_assigned",
+                request_id=task.get("request_id"),
+                task_id=task.get("task_id"),
+                task_type=task.get("task_type"),
+                worker_id=worker.worker_id,
+                document_uri=worker.uri,
+                source_fingerprint=source_fingerprint_from_kwargs(
+                    task.get("kwargs", {})),
+                environment_fingerprint=_environment_fingerprint(
+                    self.client, task.get("kwargs", {})),
+                details={"context": dict(task.get("context", {}))},
+            )
             worker.task_queue.put(task)
 
     def submit_task(self, task: Task):
         """Submit a raw task dict. Prefer the convenience methods below."""
+        task.setdefault("request_id", new_correlation_id())
+        task.setdefault("task_id", new_correlation_id())
+        task.setdefault("context", {})
+        self.client.emit_execution_event(
+            "task_submitted",
+            request_id=task.get("request_id"),
+            task_id=task.get("task_id"),
+            task_type=task.get("task_type"),
+            source_fingerprint=source_fingerprint_from_kwargs(
+                task.get("kwargs", {})),
+            environment_fingerprint=_environment_fingerprint(
+                self.client, task.get("kwargs", {})),
+            details={"context": dict(task.get("context", {}))},
+        )
         self.overall_task_queue.put(task)
 
     def get_worker_for_uri(self, uri: str) -> Worker:

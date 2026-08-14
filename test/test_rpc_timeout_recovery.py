@@ -108,6 +108,36 @@ def test_submit_resilient_preserves_rpc_timeout_type():
     assert exc_info.value is timeout_error
 
 
+def test_submit_resilient_merges_request_observation_context():
+    captured = {}
+
+    class ImmediatePool:
+        def submit_task(self, task):
+            captured.update(task)
+            task["result_q"].put({"success": True, "content": "ok"})
+
+    client = FakeClient()
+    client.worker_pool = ImmediatePool()
+    client.watchdog = type("FakeWatchdog", (), {"server_ready": threading.Event()})()
+    client.watchdog.server_ready.set()
+    client.current_observation_context = lambda: {
+        "action_id": "action-1", "node_id": "node-1"}
+
+    result = _submit_resilient(
+        client,
+        "get_diagnostics",
+        {"text": "example : True := by trivial"},
+        context={"generation_id": "generation-1"},
+    )
+
+    assert result == "ok"
+    assert captured["context"] == {
+        "action_id": "action-1",
+        "node_id": "node-1",
+        "generation_id": "generation-1",
+    }
+
+
 def test_submit_resilient_preserves_precise_toxic_reason():
     class ImmediatePool:
         def submit_task(self, task):

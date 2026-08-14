@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import atexit
+from contextlib import contextmanager
+from contextvars import ContextVar
 import json
 import os
 import queue
@@ -16,6 +18,8 @@ from . import debug_log
 from .errors import ServiceUnavailable, ToxicTaskError
 from .rpc_session import RpcTimeoutError
 from .watchdog import FATAL_RE, RESILIENT_RESPONSE_TIMEOUT
+from .observability import EventSink, emit_safely, new_correlation_id
+from .observability import fingerprint_lean_environment, fingerprint_text
 
 if TYPE_CHECKING:
     from .pool import WorkerPool
@@ -80,7 +84,9 @@ def _is_dead_server_error(err: Exception) -> bool:
 
 
 def _submit_resilient(client: "LspClient", task_type: str, kwargs: dict,
-                      timeout: float = 120.0):
+                      timeout: float = 120.0, *,
+                      request_id: Optional[str] = None,
+                      context: Optional[dict[str, Any]] = None):
     """Submit a task with transparent crash/wedge recovery.
 
     Waits for ``server_ready``, submits to the CURRENT worker pool (re-fetched
@@ -107,16 +113,39 @@ def _submit_resilient(client: "LspClient", task_type: str, kwargs: dict,
     effective_timeout = max(timeout, RESILIENT_RESPONSE_TIMEOUT)
 
     input_text = kwargs.get("text", "") if isinstance(kwargs, dict) else ""
+    inherited_context = getattr(client, "current_observation_context", None)
+    inherited_context = (
+        inherited_context() if callable(inherited_context) else {})
+    merged_context = {
+        **dict(inherited_context or {}),
+        **dict(context or {}),
+    }
+    correlation_id = request_id or new_correlation_id()
+    attempt = 0
     while True:
+        attempt += 1
         client.watchdog.server_ready.wait()
         pool = client.worker_pool
         if pool is None:
             raise RuntimeError("Worker pool not initialized")
         rq: queue.Queue = queue.Queue()
-        pool.submit_task({"task_type": task_type, "result_q": rq, "kwargs": kwargs})
+        pool.submit_task({
+            "task_type": task_type,
+            "result_q": rq,
+            "kwargs": kwargs,
+            "request_id": correlation_id,
+            "context": merged_context,
+        })
         try:
             resp = rq.get(timeout=effective_timeout)
         except queue.Empty:
+            client.emit_execution_event(
+                "resilient_wait_expired",
+                request_id=correlation_id,
+                task_type=task_type,
+                outcome="infrastructure_error",
+                details={"attempt": attempt},
+            )
             # Only reachable if the watchdog FAILED to detect/restart within
             # effective_timeout (e.g. watchdog thread died).  Wait for any
             # in-flight restart to settle, then retry on the (possibly new) pool.
@@ -133,11 +162,25 @@ def _submit_resilient(client: "LspClient", task_type: str, kwargs: dict,
                     str(resp.get("toxic_reason")
                         or "crashed/wedged the server"),
                     input_text)
+            client.emit_execution_event(
+                "resilient_retry",
+                request_id=correlation_id,
+                task_type=task_type,
+                outcome="infrastructure_error",
+                details={"attempt": attempt, "reason": "service_unavailable"},
+            )
             continue  # innocent -> transparent retry on the (now-current) pool
         # Pipe/connection errors mean the server process died (^C, OOM, crash).
         # Wait for the watchdog to restart, then retry — same as ServiceUnavailable
         # for an innocent task.
         if _is_dead_server_error(err):
+            client.emit_execution_event(
+                "resilient_retry",
+                request_id=correlation_id,
+                task_type=task_type,
+                outcome="infrastructure_error",
+                details={"attempt": attempt, "reason": "dead_server"},
+            )
             while client.watchdog.server_ready.is_set():
                 time.sleep(0.5)
             continue
@@ -157,6 +200,7 @@ class LspClient:
         worker_memory_high_bytes: Optional[int] = None,
         worker_memory_max_bytes: Optional[int] = None,
         watchdog_memory_poll_interval: float = 1.0,
+        event_sink: Optional[EventSink] = None,
     ):
         """Initialize the LSP client with a server command."""
         self.process: Optional[subprocess.Popen] = None
@@ -165,6 +209,11 @@ class LspClient:
         self.worker_memory_high_bytes = worker_memory_high_bytes
         self.worker_memory_max_bytes = worker_memory_max_bytes
         self.watchdog_memory_poll_interval = watchdog_memory_poll_interval
+        self.event_sink = event_sink
+        self._observation_context: ContextVar[dict[str, Any]] = ContextVar(
+            f"pyleaner_observation_context_{id(self)}", default={})
+        self._environment_fingerprint_cache: dict[str, str | None] = {}
+        self._environment_fingerprint_lock = threading.Lock()
         self.message_id = 0
         self._id_lock = threading.Lock()
         # Route responses by message id: {msg_id: response_queue}
@@ -187,6 +236,55 @@ class LspClient:
         # connect(), armed in create_pool(), stopped in exit().
         from .watchdog import Watchdog  # deferred to avoid import cycle
         self.watchdog: Watchdog = Watchdog(self)
+
+    def emit_execution_event(self, kind: str, **fields: Any):
+        """Emit one optional lifecycle event through the configured sink.
+
+        Sinks may be called concurrently by worker, router, and watchdog
+        threads and therefore should enqueue quickly and be thread-safe.
+        Sink exceptions are isolated from Lean execution.
+        """
+        return emit_safely(self.event_sink, kind, **fields)
+
+    def current_observation_context(self) -> dict[str, Any]:
+        """Return a detached request-scoped correlation context."""
+        return dict(self._observation_context.get())
+
+    @contextmanager
+    def observation_context(self, **fields: Any):
+        """Attach caller-owned trace fields to nested Lean tasks.
+
+        The context is local to the current Python execution context and is
+        propagated into worker task envelopes. PyLeaner stores it as opaque
+        metadata and does not interpret any domain-specific keys.
+        """
+        value = {
+            **self.current_observation_context(),
+            **{key: item for key, item in fields.items() if item is not None},
+        }
+        token = self._observation_context.set(value)
+        try:
+            yield self
+        finally:
+            self._observation_context.reset(token)
+
+    def task_environment_fingerprint(self, kwargs: dict[str, Any]) -> str | None:
+        """Return a cached static environment identity for one source task."""
+        source = kwargs.get("text") if isinstance(kwargs, dict) else ""
+        source = source if isinstance(source, str) else ""
+        cache_key = fingerprint_text(source)
+        with self._environment_fingerprint_lock:
+            if cache_key in self._environment_fingerprint_cache:
+                return self._environment_fingerprint_cache[cache_key]
+        try:
+            value = fingerprint_lean_environment(
+                self.cwd or ".", self.server_cmd, source=source
+            ).fingerprint
+        except (OSError, ValueError):
+            value = None
+        with self._environment_fingerprint_lock:
+            self._environment_fingerprint_cache[cache_key] = value
+        return value
 
     # ── Process management ──────────────────────────────────
 
@@ -470,7 +568,15 @@ class LspClient:
         self.watchdog.attach_worker_guards()
         return self.worker_pool
 
-    def submit_resilient(self, task_type: str, kwargs: dict, timeout: float = 120.0):
+    def submit_resilient(
+        self,
+        task_type: str,
+        kwargs: dict,
+        timeout: float = 120.0,
+        *,
+        request_id: Optional[str] = None,
+        context: Optional[dict[str, Any]] = None,
+    ):
         """Submit a task with transparent crash/wedge recovery.
 
         Waits for the server to be ready, submits to the current worker pool, and
@@ -478,7 +584,14 @@ class LspClient:
         caused the failure) or transparently retries (innocent). See
         :func:`pyleaner.client._submit_resilient`.
         """
-        return _submit_resilient(self, task_type, kwargs, timeout)
+        return _submit_resilient(
+            self,
+            task_type,
+            kwargs,
+            timeout,
+            request_id=request_id,
+            context=context,
+        )
 
     def shutdown(self) -> Any:
         """Shutdown LSP connection."""

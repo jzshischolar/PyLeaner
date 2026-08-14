@@ -22,11 +22,21 @@ import queue  # noqa: E402
 
 # ── Shared types ─────────────────────────────────────────────
 
-class Task(TypedDict):
+class _RequiredTask(TypedDict):
     """A task to be executed by a worker thread."""
     task_type: str
     result_q: "queue.Queue"  # type: ignore[name-defined]
     kwargs: Dict[str, Any]
+
+
+class Task(_RequiredTask, total=False):
+    """Worker task with optional transport-level correlation metadata."""
+
+    request_id: str
+    task_id: str
+    context: Dict[str, Any]
+    _culprit: bool
+    _culprit_reason: str
 
 
 # ── Debug utilities ──────────────────────────────────────────
@@ -57,6 +67,17 @@ from .rpc_session import (  # noqa: E402, F401
 from .worker import Worker  # noqa: E402, F401
 from .watchdog import Watchdog  # noqa: E402, F401
 from .errors import ServiceUnavailable, ToxicTaskError  # noqa: E402, F401
+from .observability import (  # noqa: E402, F401
+    ENVIRONMENT_SCHEMA_VERSION,
+    EVENT_SCHEMA_VERSION,
+    EventSink,
+    LeanEnvironmentFingerprint,
+    LeanExecutionEvent,
+    fingerprint_lean_environment,
+    fingerprint_text,
+    fingerprint_value,
+    new_correlation_id,
+)
 
 __all__ = [
     "__version__",
@@ -77,4 +98,13 @@ __all__ = [
     "RpcContentModifiedError",
     "RpcRequestCancelledError",
     "RpcTimeoutError",
+    "EVENT_SCHEMA_VERSION",
+    "ENVIRONMENT_SCHEMA_VERSION",
+    "EventSink",
+    "LeanEnvironmentFingerprint",
+    "LeanExecutionEvent",
+    "fingerprint_lean_environment",
+    "fingerprint_text",
+    "fingerprint_value",
+    "new_correlation_id",
 ]

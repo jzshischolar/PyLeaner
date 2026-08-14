@@ -11,6 +11,7 @@ from . import debug_log, Task
 from .rpc_session import RpcSession, KeepAliveManager
 from .errors import ServiceUnavailable
 from .watchdog import POISON_METHOD
+from .observability import fingerprint_value, source_fingerprint_from_kwargs
 
 if TYPE_CHECKING:
     from .client import LspClient
@@ -125,18 +126,85 @@ class Worker:
             task_type = task.get("task_type")
             result_q = task.get("result_q")
             kwargs = task.get("kwargs", {})
+            source_fingerprint = source_fingerprint_from_kwargs(kwargs)
+            environment_resolver = getattr(
+                self.client, "task_environment_fingerprint", None)
+            event_fields = {
+                "request_id": task.get("request_id"),
+                "task_id": task.get("task_id"),
+                "task_type": task_type,
+                "worker_id": self.worker_id,
+                "document_uri": self.uri,
+                "source_fingerprint": source_fingerprint,
+                "environment_fingerprint": (
+                    environment_resolver(kwargs)
+                    if callable(environment_resolver) else None
+                ),
+            }
+            self.client.emit_execution_event(
+                "task_started",
+                **event_fields,
+                details={
+                    "document_version_before": self.document_version,
+                    "context": dict(task.get("context", {})),
+                },
+            )
             try:
                 result = self.process_funcs[task_type](**kwargs)
                 result_q.put({"success": True, "content": result})
+                diagnostics = (
+                    result.get("diagnostics", [])
+                    if isinstance(result, dict)
+                    else result if task_type in {"changecontent", "get_diagnostics"}
+                    and isinstance(result, list)
+                    else []
+                )
+                self.client.emit_execution_event(
+                    "task_succeeded",
+                    **event_fields,
+                    outcome="success",
+                    details={
+                        "duration_ms": round(
+                            (time.monotonic() - self.task_started_at) * 1000, 3),
+                        "document_version_after": self.document_version,
+                        "diagnostic_count": len(diagnostics),
+                        "result_fingerprint": fingerprint_value(result),
+                        "context": dict(task.get("context", {})),
+                    },
+                )
             except ServiceUnavailable:
                 # Poisoned by the watchdog during a restart: fail the in-flight
                 # task (toxic flag from its _culprit mark) + drain queued tasks
                 # as innocent, then exit (the hard restart replaces this pool).
+                self.client.emit_execution_event(
+                    "task_interrupted",
+                    **event_fields,
+                    outcome="infrastructure_error",
+                    details={
+                        "duration_ms": round(
+                            (time.monotonic() - self.task_started_at) * 1000, 3),
+                        "toxic": bool(task.get("_culprit", False)),
+                        "reason": task.get("_culprit_reason"),
+                        "context": dict(task.get("context", {})),
+                    },
+                )
                 self._on_service_unavailable()
                 break
             except Exception as e:
                 if result_q is not None:
                     result_q.put({"success": False, "error": e})
+                self.client.emit_execution_event(
+                    "task_failed",
+                    **event_fields,
+                    outcome="error",
+                    details={
+                        "duration_ms": round(
+                            (time.monotonic() - self.task_started_at) * 1000, 3),
+                        "error_type": type(e).__name__,
+                        "error": str(e),
+                        "context": dict(task.get("context", {})),
+                    },
+                )
             finally:
                 self.client.watchdog.task_finished(
                     self.worker_id, watchdog_generation)
