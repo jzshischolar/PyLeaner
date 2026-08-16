@@ -185,6 +185,20 @@ structure SearchDeclarationsResult where
   candidates : Array DeclarationSearchCandidate
   deriving Lean.ToJson, Lean.FromJson
 
+/-- Query the kernel-certified transitive axioms of one elaborated declaration. -/
+structure DeclarationAxiomsParams where
+  declarationName : String
+  deriving Lean.ToJson, Lean.FromJson
+
+/-- Result of ``Lean.collectAxioms`` for a declaration in the final snapshot. -/
+structure DeclarationAxiomsResult where
+  success : Bool
+  declarationName : String
+  resolvedName : Option String := none
+  axioms : Array String := #[]
+  error : Option String := none
+  deriving Lean.ToJson, Lean.FromJson
+
 /-- Request parameters for lean/testHasParams -/
 structure TestHasParamsParams where
   deriving Lean.ToJson, Lean.FromJson

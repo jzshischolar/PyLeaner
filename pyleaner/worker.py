@@ -65,6 +65,7 @@ class Worker:
             "test_declaration_name": self.test_declaration_name,
             "extract_declarations": self.extract_declarations,
             "search_declarations": self.search_declarations,
+            "declaration_axioms": self.declaration_axioms,
             "test_has_params": self.test_has_params,
             "test_params_text": self.test_params_text,
             "test_type_text": self.test_type_text,
@@ -456,6 +457,21 @@ class Worker:
             {"line": 0, "character": 0},
             "LeanLspExtension.searchDeclarations",
             {"query": query, "maxResults": max_results, "fuzzy": fuzzy},
+        )
+        if isinstance(result, dict):
+            result = dict(result)
+            result["diagnostics"] = diagnostics
+        return result
+
+    def declaration_axioms(
+        self, text, declaration_name, content_range=None
+    ) -> Any:
+        """Return ``Lean.collectAxioms`` for one declaration in ``text``."""
+        diagnostics = self._didchange(text, content_range or {})
+        result = self._submit_rpc(
+            {"line": 0, "character": 0},
+            "LeanLspExtension.declarationAxioms",
+            {"declarationName": declaration_name},
         )
         if isinstance(result, dict):
             result = dict(result)

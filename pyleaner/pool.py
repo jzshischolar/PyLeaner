@@ -223,6 +223,19 @@ class WorkerPool:
             "content_range": content_range or {},
         }, timeout=timeout)
 
+    def declaration_axioms(
+        self, text: str, declaration_name: str,
+        content_range: dict | None = None, timeout: float = 60.0,
+    ) -> Any:
+        """Return the transitive kernel axiom dependencies of a declaration."""
+        if not declaration_name.strip():
+            raise ValueError("declaration_name must not be empty")
+        return self._submit("declaration_axioms", {
+            "text": text,
+            "declaration_name": declaration_name,
+            "content_range": content_range or {},
+        }, timeout=timeout)
+
     def get_diagnostics(
         self, text: str, content_range: dict | None = None,
         timeout: float = 60.0

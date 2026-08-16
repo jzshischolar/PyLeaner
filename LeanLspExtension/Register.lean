@@ -9,6 +9,7 @@ import Lean.Parser.Command
 import Lean.Syntax
 import Lean.Data.EditDistance
 import Lean.Util.FoldConsts
+import Lean.Util.CollectAxioms
 import LeanLspExtension.Compat
 import LeanLspExtension.Protocol
 
@@ -1453,6 +1454,45 @@ def searchDeclarations (params : SearchDeclarationsParams) : RequestM (RequestTa
           score := score
         }
     return { success := true, query := params.query, candidates := candidates }
+
+/-- Return Lean's kernel-facing transitive axiom dependency set.
+
+Unlike value-reference inspection this works for opaque theorem bodies and is
+the same semantic primitive used by ``#print axioms``.  The RPC remains
+domain-neutral: callers decide whether any returned axiom is allowed.
+-/
+@[server_rpc_method]
+def declarationAxioms
+    (params : DeclarationAxiomsParams) :
+    RequestM (RequestTask DeclarationAxiomsResult) := do
+  let doc ← readDoc
+  let snapsTask := doc.cmdSnaps.waitAll
+  mapTaskCheap snapsTask fun (snaps, _) => do
+    let some snap := snaps.getLast?
+      | return {
+          success := false
+          declarationName := params.declarationName
+          error := some "document has no elaborated snapshot"
+        }
+    let candidates := declarationNameVariants params.declarationName |>.filter
+      fun name => snap.env.contains name
+    let candidates := candidates.foldl
+      (fun values name => if values.contains name then values else values.push name)
+      #[]
+    if candidates.size != 1 then
+      return {
+        success := false
+        declarationName := params.declarationName
+        error := some "declaration is absent or namespace-ambiguous"
+      }
+    let name := candidates[0]!
+    let axioms ← runTermElabM snap do Lean.collectAxioms name
+    return {
+      success := true
+      declarationName := params.declarationName
+      resolvedName := some (name.toString (escape := false))
+      axioms := axioms.map (·.toString (escape := false)) |>.qsort (· < ·)
+    }
 
 
 
