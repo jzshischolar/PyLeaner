@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -10,6 +11,11 @@ from pyleaner import LspClient
 
 
 MATHLIB_PROJECT = os.environ.get("PYLEANER_MATHLIB_PROJECT")
+if not MATHLIB_PROJECT:
+    conventional_project = Path.home() / "LeanProject"
+    if ((conventional_project / "lakefile.toml").is_file()
+            or (conventional_project / "lakefile.lean").is_file()):
+        MATHLIB_PROJECT = str(conventional_project.resolve())
 SOURCE = """import Mathlib
 import LeanLspExtension
 namespace MathlibMigrationContract
