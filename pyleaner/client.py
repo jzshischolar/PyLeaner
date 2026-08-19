@@ -216,6 +216,10 @@ class LspClient:
         self._environment_fingerprint_lock = threading.Lock()
         self.message_id = 0
         self._id_lock = threading.Lock()
+        # Requests and notifications may be emitted concurrently by the
+        # worker pool.  Serialize complete framed messages so large didOpen
+        # payloads cannot interleave on the shared LSP stdin pipe.
+        self._send_lock = threading.Lock()
         # Route responses by message id: {msg_id: response_queue}
         self._pending_requests: Dict[int, queue.Queue] = {}
         self._pending_lock = threading.Lock()
@@ -463,10 +467,12 @@ class LspClient:
         debug_log(
             f"Sending: {message.get('method', message.get('id', 'response'))}"
         )
-        if self.process is None or self.process.stdin is None:
-            raise RuntimeError("Process or stdin is not available")
-        self.process.stdin.write(self._make_lsp_message(message))
-        self.process.stdin.flush()
+        payload = self._make_lsp_message(message)
+        with self._send_lock:
+            if self.process is None or self.process.stdin is None:
+                raise RuntimeError("Process or stdin is not available")
+            self.process.stdin.write(payload)
+            self.process.stdin.flush()
 
     def _next_id(self) -> int:
         """Get next message ID (thread-safe)."""

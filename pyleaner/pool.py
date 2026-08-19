@@ -64,17 +64,25 @@ class WorkerPool:
     # ── Infrastructure ──────────────────────────────────────
 
     def initialize_all_workers(self) -> None:
-        """Call initialize_environment on all workers.
+        """Initialize every Lean document concurrently.
 
         Must be called AFTER LspClient.worker_pool is assigned so that
         notification routing works during _didopen.
 
         Raises RuntimeError if *all* workers fail to start.
         """
-        failed = 0
-        for w in self.workers:
-            if not w.initialize_environment():
-                failed += 1
+        with ThreadPoolExecutor(
+            max_workers=len(self.workers),
+            thread_name_prefix="pyleaner-environment-init",
+        ) as executor:
+            futures = [
+                executor.submit(worker.initialize_environment)
+                for worker in self.workers
+            ]
+            failed = sum(
+                not future.result()
+                for future in as_completed(futures)
+            )
         if failed == len(self.workers):
             raise RuntimeError(
                 f"All {failed} workers failed to initialize their Lean environment."
