@@ -616,6 +616,13 @@ class Watchdog:
     def start(self) -> None:
         """Start the monitor process and its event receiver (idempotent)."""
         if self._process is None or not self._process.is_alive():
+            previous = self._process
+            if previous is not None:
+                debug_log(
+                    "Lean watchdog monitor was not alive before start "
+                    "pid=%s exitcode=%s alive=%s",
+                    getattr(previous, "pid", None), previous.exitcode,
+                    previous.is_alive())
             context = multiprocessing.get_context("spawn")
             self._command_queue = context.Queue()
             self._event_queue = context.Queue()
@@ -636,7 +643,13 @@ class Watchdog:
                 name="lean-watchdog-monitor",
                 daemon=True,
             )
-            self._process.start()
+            try:
+                self._process.start()
+            except BaseException as exc:
+                debug_log(
+                    "Lean watchdog monitor start failed type=%s error=%s",
+                    type(exc).__name__, exc)
+                raise
         if self._thread is None or not self._thread.is_alive():
             self._thread = threading.Thread(
                 target=self._receive_events,
@@ -765,9 +778,17 @@ class Watchdog:
             except queue.Empty:
                 process = self._process
                 if process is not None and not process.is_alive():
+                    exitcode = process.exitcode
+                    signal_name = (
+                        f"SIG{-exitcode}" if isinstance(exitcode, int) and exitcode < 0
+                        else None)
+                    debug_log(
+                        "Lean watchdog monitor death pid=%s exitcode=%s signal=%s",
+                        getattr(process, "pid", None), exitcode, signal_name)
                     self._recover_with_retry(
                         "watchdog_death",
-                        "Lean watchdog monitor process exited unexpectedly",
+                        "Lean watchdog monitor process exited unexpectedly "
+                        f"(exitcode={exitcode}, signal={signal_name})",
                         set(),
                     )
                 continue
