@@ -620,9 +620,8 @@ class Watchdog:
             if previous is not None:
                 debug_log(
                     "Lean watchdog monitor was not alive before start "
-                    "pid=%s exitcode=%s alive=%s",
-                    getattr(previous, "pid", None), previous.exitcode,
-                    previous.is_alive())
+                    f"pid={getattr(previous, 'pid', None)} "
+                    f"exitcode={previous.exitcode} alive={previous.is_alive()}")
             context = multiprocessing.get_context("spawn")
             self._command_queue = context.Queue()
             self._event_queue = context.Queue()
@@ -647,8 +646,8 @@ class Watchdog:
                 self._process.start()
             except BaseException as exc:
                 debug_log(
-                    "Lean watchdog monitor start failed type=%s error=%s",
-                    type(exc).__name__, exc)
+                    "Lean watchdog monitor start failed "
+                    f"type={type(exc).__name__} error={exc}")
                 raise
         if self._thread is None or not self._thread.is_alive():
             self._thread = threading.Thread(
@@ -783,8 +782,9 @@ class Watchdog:
                         f"SIG{-exitcode}" if isinstance(exitcode, int) and exitcode < 0
                         else None)
                     debug_log(
-                        "Lean watchdog monitor death pid=%s exitcode=%s signal=%s",
-                        getattr(process, "pid", None), exitcode, signal_name)
+                        "Lean watchdog monitor death "
+                        f"pid={getattr(process, 'pid', None)} "
+                        f"exitcode={exitcode} signal={signal_name}")
                     self._recover_with_retry(
                         "watchdog_death",
                         "Lean watchdog monitor process exited unexpectedly "
