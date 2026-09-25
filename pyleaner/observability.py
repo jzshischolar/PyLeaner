@@ -36,6 +36,7 @@ class LeanExecutionEvent:
     document_uri: Optional[str] = None
     source_fingerprint: Optional[str] = None
     environment_fingerprint: Optional[str] = None
+    runtime_environment_fingerprint: Optional[str] = None
     outcome: Optional[str] = None
     details: Mapping[str, Any] = field(default_factory=dict)
     event_id: str = field(default_factory=lambda: uuid.uuid4().hex)
@@ -180,6 +181,35 @@ def fingerprint_lean_environment(
         imports=imports,
         file_fingerprints=dict(sorted(files.items())),
     )
+
+
+def runtime_environment_fingerprint(
+    project_root: str | Path,
+    server_command: Sequence[str],
+) -> str:
+    """Fingerprint only the shared Lean runtime, excluding task imports."""
+    root = Path(project_root or ".").resolve()
+    if not root.is_dir():
+        raise FileNotFoundError(f"Lean project root does not exist: {root}")
+    files: dict[str, str] = {}
+    toolchain: str | None = None
+    for name in (
+        "lean-toolchain", "lake-manifest.json", "lakefile.lean", "lakefile.toml",
+    ):
+        path = root / name
+        if not path.is_file():
+            continue
+        content = path.read_text(encoding="utf-8")
+        files[name] = fingerprint_text(content)
+        if name == "lean-toolchain":
+            toolchain = content.strip() or None
+    return fingerprint_value({
+        "schema_version": ENVIRONMENT_SCHEMA_VERSION + ".runtime",
+        "project_root": str(root),
+        "server_command": list(server_command),
+        "lean_toolchain": toolchain,
+        "file_fingerprints": dict(sorted(files.items())),
+    })
 
 
 def emit_safely(

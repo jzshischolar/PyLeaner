@@ -19,7 +19,9 @@ from .errors import ServiceUnavailable, ToxicTaskError
 from .rpc_session import RpcTimeoutError
 from .watchdog import FATAL_RE, RESILIENT_RESPONSE_TIMEOUT
 from .observability import EventSink, emit_safely, new_correlation_id
-from .observability import fingerprint_lean_environment, fingerprint_text
+from .observability import (
+    fingerprint_lean_environment, fingerprint_text, runtime_environment_fingerprint,
+)
 
 if TYPE_CHECKING:
     from .pool import WorkerPool
@@ -214,6 +216,7 @@ class LspClient:
             f"pyleaner_observation_context_{id(self)}", default={})
         self._environment_fingerprint_cache: dict[str, str | None] = {}
         self._environment_fingerprint_lock = threading.Lock()
+        self._runtime_environment_fingerprint: str | None = None
         self.message_id = 0
         self._id_lock = threading.Lock()
         # Requests and notifications may be emitted concurrently by the
@@ -288,6 +291,19 @@ class LspClient:
             value = None
         with self._environment_fingerprint_lock:
             self._environment_fingerprint_cache[cache_key] = value
+        return value
+
+    def runtime_environment_fingerprint(self) -> str | None:
+        """Return the source-independent Lean runtime identity."""
+        with self._environment_fingerprint_lock:
+            if self._runtime_environment_fingerprint is not None:
+                return self._runtime_environment_fingerprint
+        try:
+            value = runtime_environment_fingerprint(self.cwd or ".", self.server_cmd)
+        except (OSError, ValueError):
+            value = None
+        with self._environment_fingerprint_lock:
+            self._runtime_environment_fingerprint = value
         return value
 
     # ── Process management ──────────────────────────────────

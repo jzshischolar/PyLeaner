@@ -130,6 +130,8 @@ class Worker:
             source_fingerprint = source_fingerprint_from_kwargs(kwargs)
             environment_resolver = getattr(
                 self.client, "task_environment_fingerprint", None)
+            runtime_resolver = getattr(
+                self.client, "runtime_environment_fingerprint", None)
             event_fields = {
                 "request_id": task.get("request_id"),
                 "task_id": task.get("task_id"),
@@ -140,6 +142,9 @@ class Worker:
                 "environment_fingerprint": (
                     environment_resolver(kwargs)
                     if callable(environment_resolver) else None
+                ),
+                "runtime_environment_fingerprint": (
+                    runtime_resolver() if callable(runtime_resolver) else None
                 ),
             }
             self.client.emit_execution_event(

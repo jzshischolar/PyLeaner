@@ -44,9 +44,22 @@ class Task(_RequiredTask, total=False):
 DEBUG = False
 
 
-def debug_log(msg: str) -> None:
-    """Print debug message if DEBUG is enabled."""
+def debug_log(msg: str, *args: Any) -> None:
+    """Print a debug message if ``DEBUG`` is enabled.
+
+    ``debug_log`` used to accept only one already-formatted string.  Older
+    watchdog workers still call it with ``logging``-style ``%s`` arguments,
+    though, and those workers can survive a source update through a fork or a
+    long-lived supervisor.  Keep the one-string API while accepting that
+    historical calling convention so diagnostics cannot break recovery.
+    """
     if DEBUG:
+        if args:
+            try:
+                msg = msg % args
+            except (TypeError, ValueError):
+                # Diagnostics must never become a second failure path.
+                msg = " ".join([str(msg), *(str(arg) for arg in args)])
         print(f"[DEBUG] {msg}", flush=True)
 
 
@@ -74,6 +87,7 @@ from .observability import (  # noqa: E402, F401
     LeanEnvironmentFingerprint,
     LeanExecutionEvent,
     fingerprint_lean_environment,
+    runtime_environment_fingerprint,
     fingerprint_text,
     fingerprint_value,
     new_correlation_id,
@@ -104,6 +118,7 @@ __all__ = [
     "LeanEnvironmentFingerprint",
     "LeanExecutionEvent",
     "fingerprint_lean_environment",
+    "runtime_environment_fingerprint",
     "fingerprint_text",
     "fingerprint_value",
     "new_correlation_id",

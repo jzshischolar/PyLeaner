@@ -43,6 +43,10 @@ class WorkerPool:
         self.overall_task_queue: queue.Queue[Task] = queue.Queue()
         self.keep_alive_manager = KeepAliveManager()
         self.keep_alive_manager.start()
+        # The router is a single consumer, but keeping a cursor makes ties
+        # deterministic and prevents the first worker from becoming a hot
+        # spot when all workers have the same measured load.
+        self._selection_cursor = 0
 
         def create_worker(i: int) -> Worker:
             return Worker(
@@ -118,7 +122,22 @@ class WorkerPool:
                     details={"reason": "no_healthy_workers"},
                 )
                 continue
-            worker = min(ready, key=lambda w: w.task_queue.qsize())
+            # ``qsize()`` excludes the task currently being executed by the
+            # worker thread.  Using it alone makes every empty-queue tie pick
+            # worker 1, even while worker 1 is busy and the other workers are
+            # idle.  That concentrates document changes on one Lean process,
+            # increasing cancellation/re-elaboration and logical PID
+            # replacement rates.  Count the in-flight task as one unit and
+            # rotate ties so an otherwise idle pool is used evenly.
+            def load(worker: Worker) -> tuple[int, int]:
+                busy = 1 if worker.current_task is not None else 0
+                distance = (
+                    worker.worker_id - 1 - self._selection_cursor
+                ) % len(self.workers)
+                return worker.task_queue.qsize() + busy, distance
+
+            worker = min(ready, key=load)
+            self._selection_cursor = worker.worker_id % len(self.workers)
             self.client.emit_execution_event(
                 "task_assigned",
                 request_id=task.get("request_id"),
