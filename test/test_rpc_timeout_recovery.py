@@ -9,7 +9,7 @@ import pytest
 
 import pyleaner.watchdog as watchdog_module
 from pyleaner.client import _submit_resilient
-from pyleaner.errors import ServiceUnavailable, ToxicTaskError
+from pyleaner.errors import LeanTaskTimeout, ServiceUnavailable, ToxicTaskError
 from pyleaner.rpc_session import RpcSession, RpcTimeoutError
 from pyleaner.watchdog import (
     RESILIENT_RESPONSE_TIMEOUT,
@@ -90,7 +90,7 @@ def test_watchdog_teardown_wakes_pending_rpc_callers():
     assert isinstance(response_q.get_nowait(), ServiceUnavailable)
 
 
-def test_submit_resilient_preserves_rpc_timeout_type():
+def test_submit_resilient_returns_rpc_timeout_to_tool_boundary():
     timeout_error = RpcTimeoutError("LeanLspExtension.extractDeclarations", 160)
 
     class ImmediatePool:
@@ -102,10 +102,10 @@ def test_submit_resilient_preserves_rpc_timeout_type():
     client.watchdog = type("FakeWatchdog", (), {"server_ready": threading.Event()})()
     client.watchdog.server_ready.set()
 
-    with pytest.raises(RpcTimeoutError) as exc_info:
+    with pytest.raises(LeanTaskTimeout) as exc_info:
         _submit_resilient(client, "extract_declarations", {"text": "def x := 1"})
 
-    assert exc_info.value is timeout_error
+    assert exc_info.value.__cause__ is timeout_error
 
 
 def test_submit_resilient_merges_request_observation_context():

@@ -15,7 +15,7 @@ import time
 from typing import Any, Optional, Dict, TYPE_CHECKING
 
 from . import debug_log
-from .errors import ServiceUnavailable, ToxicTaskError
+from .errors import LeanTaskTimeout, ServiceUnavailable, ToxicTaskError
 from .rpc_session import RpcTimeoutError
 from .watchdog import FATAL_RE, RESILIENT_RESPONSE_TIMEOUT
 from .observability import EventSink, emit_safely, new_correlation_id
@@ -112,6 +112,8 @@ def _submit_resilient(client: "LspClient", task_type: str, kwargs: dict,
     # robustness-critical, so we give the watchdog ample headroom over its
     # worst-case detection latency (deadline + interval = 140s) to resolve every
     # wedge via poison/attribution rather than the client bailing early.
+    from .timeout_policy import note_lean_submission
+    note_lean_submission()
     effective_timeout = max(timeout, RESILIENT_RESPONSE_TIMEOUT)
 
     input_text = kwargs.get("text", "") if isinstance(kwargs, dict) else ""
@@ -149,16 +151,19 @@ def _submit_resilient(client: "LspClient", task_type: str, kwargs: dict,
                 details={"attempt": attempt},
             )
             # Only reachable if the watchdog FAILED to detect/restart within
-            # effective_timeout (e.g. watchdog thread died).  Wait for any
-            # in-flight restart to settle, then retry on the (possibly new) pool.
-            while client.watchdog.server_ready.is_set():
-                time.sleep(0.5)
-            continue
+            # effective_timeout (e.g. watchdog thread died). Return the
+            # deadline to the caller instead of waiting forever for a restart.
+            raise LeanTaskTimeout(
+                f"Lean task {task_type!r} exceeded its response deadline; "
+                "revise the input before retrying.")
         if resp.get("success", False):
             return resp.get("content")
         err = resp.get("error", "unknown error")
         if isinstance(err, ServiceUnavailable):
             if resp.get("toxic"):
+                reason = str(resp.get("toxic_reason") or "")
+                if "deadline" in reason.lower() or reason.lower().startswith("task exceeded "):
+                    raise LeanTaskTimeout(reason)
                 raise ToxicTaskError(
                     task_type,
                     str(resp.get("toxic_reason")
@@ -186,8 +191,10 @@ def _submit_resilient(client: "LspClient", task_type: str, kwargs: dict,
             while client.watchdog.server_ready.is_set():
                 time.sleep(0.5)
             continue
-        if isinstance(err, RpcTimeoutError):
+        if isinstance(err, LeanTaskTimeout):
             raise err
+        if isinstance(err, RpcTimeoutError):
+            raise LeanTaskTimeout(str(err)) from err
         raise RuntimeError(str(err) or repr(err))
 
 

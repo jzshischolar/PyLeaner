@@ -30,3 +30,17 @@ class ToxicTaskError(Exception):
         self.reason = reason
         self.input_text = input_text
         super().__init__(f"{task_type!r} rejected by server ({reason})")
+
+
+class LeanTaskTimeout(BaseException):
+    """A submitted Lean task exceeded its deadline; return it to the model.
+
+    Deliberately crosses broad proof-failure/transport exception handlers.
+    Tool boundaries catch it explicitly, never blindly replay the same input.
+    """
+
+
+class LeanTimeoutExhausted(BaseException):
+    """Terminal sample outcome after consecutive Lean tool timeouts."""
+
+    terminal_sample_outcome = "lean_timeout_exhausted"

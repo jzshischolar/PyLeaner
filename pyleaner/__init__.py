@@ -79,7 +79,7 @@ from .rpc_session import (  # noqa: E402, F401
 )
 from .worker import Worker  # noqa: E402, F401
 from .watchdog import Watchdog  # noqa: E402, F401
-from .errors import ServiceUnavailable, ToxicTaskError  # noqa: E402, F401
+from .errors import LeanTaskTimeout, LeanTimeoutExhausted, ServiceUnavailable, ToxicTaskError  # noqa: E402, F401
 from .observability import (  # noqa: E402, F401
     ENVIRONMENT_SCHEMA_VERSION,
     EVENT_SCHEMA_VERSION,
@@ -104,6 +104,8 @@ __all__ = [
     "Watchdog",
     "ServiceUnavailable",
     "ToxicTaskError",
+    "LeanTaskTimeout",
+    "LeanTimeoutExhausted",
     "KeepAliveManager",
     "RpcSession",
     "RpcError",

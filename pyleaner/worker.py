@@ -9,7 +9,7 @@ from typing import Any, Optional, TYPE_CHECKING
 
 from . import debug_log, Task
 from .rpc_session import RpcSession, KeepAliveManager
-from .errors import ServiceUnavailable
+from .errors import LeanTaskTimeout, ServiceUnavailable
 from .watchdog import POISON_METHOD
 from .observability import fingerprint_value, source_fingerprint_from_kwargs
 
@@ -196,7 +196,7 @@ class Worker:
                 )
                 self._on_service_unavailable()
                 break
-            except Exception as e:
+            except (Exception, LeanTaskTimeout) as e:
                 if result_q is not None:
                     result_q.put({"success": False, "error": e})
                 self.client.emit_execution_event(
@@ -345,8 +345,29 @@ class Worker:
         counter = 0
         diagnostics = None
         valid_diagnostics = []
+        deadline = time.monotonic() + timeout
         while True:
-            msg = self.notification_queue.get(timeout=timeout)
+            try:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise queue.Empty
+                msg = self.notification_queue.get(timeout=remaining)
+            except queue.Empty as exc:
+                # A newer edit cancels elaboration of the timed-out source.
+                # Keep the import prefix; the next task replaces this range.
+                try:
+                    self.client.notify("textDocument/didChange", {
+                        "textDocument": {"uri": self.uri,
+                                         "version": self._get_next_version()},
+                        "contentChanges": [{"range": content_range, "text": ""}],
+                    })
+                except Exception as cancel_error:
+                    # A concurrent worker teardown must not replace the
+                    # already-observed deadline with an infrastructure retry.
+                    debug_log("Timed-out source cancellation failed: %s", cancel_error)
+                raise LeanTaskTimeout(
+                    f"Lean elaboration exceeded {timeout:g}s; simplify the proof "
+                    "and avoid enumerating huge ranges.") from exc
             method = msg.get("method")
 
             # Poisoned by the watchdog during a restart: abort this didChange so
